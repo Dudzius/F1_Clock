@@ -1,13 +1,10 @@
-#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
-#include <WiFi.h>
+#include <WiFiManager.h>        // https://github.com/tzapu/WiFiManager
+#include <ArduinoJson.h>        // https://github.com/bblanchon/ArduinoJson
+#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C //Archived
 #include <HTTPClient.h>
-#include <ArduinoJson.h>
-//#include <LiquidCrystal.h>
-#include <Wire.h> 
-#include <LiquidCrystal_I2C.h>
 #include <time.h>
-//#include <esp_sntp.h>
-//#include <Preferences.h>
+#include <Wire.h>
+#include <WiFi.h>
 
 #define BLUE_BUTTON 15
 #define BUZZER_PIN 4
@@ -21,8 +18,9 @@
 #define NOTE_B4 494
 #define REST 0
 
+#define DEBUG_MODE 1  // Set to false to disable all Serial prints
 
-LiquidCrystal_I2C lcd(0x27,16,2);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // for notification melody (not the most pleasent sound but good enough)
 const int melody[] = {
@@ -116,10 +114,9 @@ uint8_t formula4_4[8] = {
   0b11100,
 };
 
-//Preferences prefs;
-int ChosenSeasonYear = 0;  // Global season year
+int ChosenSeasonYear = 0;
 
-HTTPClient http;
+//HTTPClient http;
 const char* nameForAP = "F1_Standings";  // hotspot name
 
 // display stages for different data
@@ -173,7 +170,12 @@ unsigned long calendarStepStartTime = 0;
 // variables for time and date
 const char* ntpServer1 = "pool.ntp.org";
 const char* ntpServer2 = "time.nist.gov";
-const char* time_zone = "EET-2EEST,M3.5.0/3,M10.5.0/4";  //Europe/Vilnius
+const char* time_zone = "EET-2EEST,M3.5.0/3,M10.5.0/4";  //Europe/Vilnius // TODO remove
+long utcOffsetSeconds = 0;
+String cityName;
+String ipAddress;
+float latitude = 0.0;
+float longitude = 0.0;
 String lastDateStr = "";
 
 bool waitingForNextData = false;
@@ -181,173 +183,370 @@ time_t nextDataCheckTime = 0;
 
 bool isNightMode = false;
 
-/*-----------Data fetching-----------*/
+/*#######################################*/
+/*----------- Data fetching   -----------*/
+
+// for retrying http requests on failure
+String httpGetWithRetry(const String& url, String requestedBy) {
+  HTTPClient http;
+  int maxRetries = 100;
+  int delayMs = 600;
+  int attempt = 0;
+  int httpCode = -1;
+  String payload = "";
+
+  while (attempt < maxRetries) {
+    http.begin(url);
+    httpCode = http.GET();
+
+    if (httpCode == 200) {
+      payload = http.getString();
+      http.end();
+      return payload;
+    }
+
+  #if DEBUG_MODE
+      Serial.println("Request for - " + requestedBy + " .Attempt " + String(attempt + 1) + ": GET failed. HTTP code: " + String(httpCode));
+  #endif
+    http.end();
+    delay(delayMs);
+    attempt++;
+  }
+
+  return "";  // Return empty string to indicate failure
+}
 
 // for getting upcoming race data to display
-void fetchUpcomingRace(const char* url) {
-  http.begin(url);
-  int httpCode = http.GET();
+void fetchUpcomingRace() {
+  String url = "https://api.jolpi.ca/ergast/f1/current/races/?format=json";
+  String payload = httpGetWithRetry(url, "Calendar(jolpi-ergastAPI)");
 
-  if (httpCode != HTTP_CODE_OK) {
-    Serial.println("Failed to fetch race data");
-    raceErrorMsg = "HTTP request";
-    http.end();
+  if (payload == "") {
+    Serial.println("Failed to fetch calendar data.");
     return;
   }
 
-  // Prepare filter
   JsonDocument filter;
-  JsonObject f_mrdata = filter["MRData"].to<JsonObject>();
-  f_mrdata["total"] = true;
-  JsonObject f_raceTable = f_mrdata["RaceTable"].to<JsonObject>();
+  JsonObject filterMRData = filter["MRData"].to<JsonObject>();
+  filterMRData["total"] = true;
+  JsonObject filterRaceTable = filterMRData["RaceTable"].to<JsonObject>();
+  JsonObject filterRaces = filterRaceTable["Races"].add<JsonObject>();
+  filterRaces["round"] = true;
+  filterRaces["raceName"] = true;
+  filterRaces["date"] = true;
+  filterRaces["time"] = true;
+  JsonObject filterQualifying = filterRaces["Qualifying"].to<JsonObject>();
+  filterQualifying["date"] = true;
+  filterQualifying["time"] = true;
 
-  JsonObject f_race0 = f_raceTable["Races"].add<JsonObject>();
-  f_race0["round"] = true;
-  f_race0["raceName"] = true;
-  f_race0["date"] = true;
-  f_race0["time"] = true;
-
-  JsonObject f_qual = f_race0["Qualifying"].to<JsonObject>();
-  f_qual["date"] = true;
-  f_qual["time"] = true;
-
-
-  DynamicJsonDocument doc(512);
-
-  DeserializationError error = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
-  http.end();
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
 
   if (error) {
-    Serial.print("Deserialization failed: ");
-    Serial.println(error.c_str());
-    raceErrorMsg = "JSON parse";
+    Serial.println("CALENDAR JSON parse error: " + String(error.c_str()));
     return;
   }
 
-  JsonObject races = doc["MRData"];
-  totalRounds = (int)races["total"];
-  JsonArray raceList = races["RaceTable"]["Races"].as<JsonArray>();
+  JsonObject racesObject = doc["MRData"];
+  totalRounds = (int)racesObject["total"];
+  JsonArray raceList = racesObject["RaceTable"]["Races"].as<JsonArray>();
 
   if (currentRound >= totalRounds) {
     raceErrorMsg = "No upcoming races";
     return;
   }
-  for (JsonObject race : raceList) {
-    upcomingRound = (int)race["round"];
+  for (JsonObject raceItem : raceList) {
+    upcomingRound = (int)raceItem["round"];
 
     if (upcomingRound == currentRound + 1) {
-      raceName = (String)race["raceName"];
-      const char* date = race["date"];
-      const char* time = race["time"];
+      raceName = (String)raceItem["raceName"];
+      const char* date = raceItem["date"];
+      const char* time = raceItem["time"];
+      const char* qualDate = raceItem["Qualifying"]["date"];
+      const char* qualTime = raceItem["Qualifying"]["time"];
 
-      const char* qualDate = race["Qualifying"]["date"];
-      const char* qualTime = race["Qualifying"]["time"];
-
-      // Parse race time as UTC
       raceStart = parseUtcToLocal(date, time);
       qualiStart = parseUtcToLocal(qualDate, qualTime);
-
       return;
     }
   }
-
   raceErrorMsg = "";
 }
 
 // parsing json data for drivers and constructors standings
-void fetchAndFormatStandings(const char* url, bool isConstructor, std::vector<String>& bodyLines) {
-  http.begin(url);
-  int httpCode = http.GET();
+void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<String>& bodyLines) {
+  String payload = httpGetWithRetry(url, "Standings(jolpi-ergastAPI)");
 
-  if (httpCode != HTTP_CODE_OK) {
-    Serial.println("HTTP request failed");
+  if (payload == "") {
+    if (isConstructor) {
+      Serial.println("Failed to fetch constructors standings data.");
+    } else {
+      Serial.println("Failed to fetch drivers standings data.");
+    }
     return;
   }
 
-  String json = http.getString();
-  DynamicJsonDocument filter(256);
-  JsonObject mrData = filter.createNestedObject("MRData");
-  JsonObject standingsTable = mrData.createNestedObject("StandingsTable");
-  standingsTable["season"] = true;
-  standingsTable["round"] = true;
-  JsonArray standingsLists = standingsTable.createNestedArray("StandingsLists");
-  JsonObject list0 = standingsLists.createNestedObject();
-  JsonArray standingsArray = list0.createNestedArray(isConstructor ? "ConstructorStandings" : "DriverStandings");
-  JsonObject standing0 = standingsArray.createNestedObject();
-  standing0["position"] = true;
-  standing0["points"] = true;
-  standing0["wins"] = true;
+  JsonDocument filter;
+  JsonObject filterMRData = filter.createNestedObject("MRData");
+  JsonObject filterStandingsTable = filterMRData.createNestedObject("StandingsTable");
+  filterStandingsTable["season"] = true;
+  filterStandingsTable["round"] = true;
+  JsonArray filterStandingsLists = filterStandingsTable.createNestedArray("StandingsLists");
+  JsonObject filterList = filterStandingsLists.createNestedObject();
+  JsonArray filterStandingsArray = filterList.createNestedArray(isConstructor ? "ConstructorStandings" : "DriverStandings");
+  JsonObject filterStandingsArrayItem = filterStandingsArray.createNestedObject();
+  filterStandingsArrayItem["position"] = true;
+  filterStandingsArrayItem["points"] = true;
+  filterStandingsArrayItem["wins"] = true;
 
   if (isConstructor) {
-    standing0.createNestedObject("Constructor")["name"] = true;
+    filterStandingsArrayItem.createNestedObject("Constructor")["name"] = true;
   } else {
-    standing0.createNestedObject("Driver")["code"] = true;
+    filterStandingsArrayItem.createNestedObject("Driver")["code"] = true;
   }
 
-  DynamicJsonDocument doc(2048);
-
-  DeserializationError error = deserializeJson(doc, json, DeserializationOption::Filter(filter));
-  http.end();
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
 
   if (error) {
-    Serial.print("Deserialization failed: ");
-    Serial.println(error.c_str());
+    if (isConstructor) {
+      Serial.println("CONSTRUCTOR JSON parse error: " + String(error.c_str()));
+    } else {
+      Serial.println("DRIVER JSON parse error: " + String(error.c_str()));
+    }
     return;
   }
 
   JsonObject standings = doc["MRData"]["StandingsTable"];
-  seasonYear = (int)standings["season"];
-  currentRound = (int)standings["round"];
+  seasonYear = standings["season"].as<int>();
+  currentRound = standings["round"].as<int>();
 
   JsonArray standingsList = standings["StandingsLists"][0][isConstructor ? "ConstructorStandings" : "DriverStandings"];
 
   bodyLines.clear();
 
   for (JsonObject standingData : standingsList) {
-    String line = "P" + String((int)standingData["position"]) + " ";
+    String line = "P" + String(standingData["position"].as<int>()) + " ";
 
     if (isConstructor) {
-      line += String((const char*)standingData["Constructor"]["name"]);
+      line += String(standingData["Constructor"]["name"].as<const char*>());
     } else {
-      line += String((const char*)standingData["Driver"]["code"]);
+      line += String(standingData["Driver"]["code"].as<const char*>());
     }
 
     line += " ";
-    int wins = (int)standingData["wins"];  //saving space by only showing more then 0 wins
+    int wins = standingData["wins"].as<int>();  //saving space by only showing more then 0 wins
     if (wins > 0) {
       line += String(wins) + "w ";
     }
-    line += String((const char*)standingData["points"]) + "pts";
+    line += String(standingData["points"].as<const char*>()) + "pts";
 
     bodyLines.push_back(line);
   }
 }
 
-// for just getting round to know if data needs re-fetching
-int fetchCurrentRound(const char* url) {
-  http.begin(url);
-  int httpCode = http.GET();
+// for getting latitude and longitude for weather and IP address for Timezone
+void fetchLocation() {
+  String url = "http://ip-api.com/json";
 
-  if (httpCode != HTTP_CODE_OK) {
-    Serial.println("HTTP fetch failed in round check");
-    http.end();
-    return -1;
+  String payload = httpGetWithRetry(url, "Location(ipAPI)");
+
+  if (payload == "") {
+    Serial.println("Failed to fetch location data.");
+    return;
   }
 
-  String json = http.getString();
-  DynamicJsonDocument doc(255);  // small size just for round/season
-  DeserializationError error = deserializeJson(doc, json);
-  http.end();
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Serial.println("LOCATION JSON parse error: " + String(error.c_str()));
+    return;
+  }
+
+  const char* timezone = doc["timezone"];
+  cityName = doc["city"].as<String>();
+  latitude = doc["lat"].as<float>();
+  longitude = doc["lon"].as<float>();
+  ipAddress = doc["query"].as<String>();
+
+  #if DEBUG_MODE
+    Serial.print("Setting timezone: ");
+    Serial.println(timezone);
+    Serial.print("Location: ");
+    Serial.print(cityName);
+    Serial.print(" (");
+    Serial.print(latitude, 4);
+    Serial.print(", ");
+    Serial.print(longitude, 4);
+    Serial.println(")");
+    Serial.print("Ip Address: ");
+    Serial.println(ipAddress);
+  #endif
+
+  fetchAndSetTimezone();
+}
+
+// for getting timezone with day light savings / setting local time
+void fetchAndSetTimezone() {
+  String url = "http://worldtimeapi.org/api/ip";
+  url += "/" + ipAddress;
+
+  String payload = httpGetWithRetry(url, "Timezone(worldTimeAPI)");
+
+  if (payload == "") {
+    Serial.println("Failed to fetch timezone data.");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Serial.println("TIMEZONE JSON parse error: " + String(error.c_str()));
+    return;
+  }
+
+  int rawOffset = doc["raw_offset"];
+  int dstOffset = doc["dst_offset"];
+
+  utcOffsetSeconds = rawOffset + dstOffset;
+
+  configTime(utcOffsetSeconds, 0, ntpServer1, ntpServer2);
+
+  #if DEBUG_MODE
+    Serial.print("Raw Offset: ");
+    Serial.println(rawOffset);
+    Serial.print("DST Offset: ");
+    Serial.println(dstOffset);
+    Serial.print("Using UTC Offset (total): ");
+    Serial.println(utcOffsetSeconds);
+  #endif
+}
+
+// for fetching weather information
+void fetchCurrentWeather() {
+  String url = "http://api.open-meteo.com/v1/forecast?";
+  url += "latitude=" + String(latitude, 4);
+  url += "&longitude=" + String(longitude, 4);
+  url += "&hourly=apparent_temperature,precipitation_probability,cloud_cover&timezone=auto&forecast_days=2";
+
+  String payload = httpGetWithRetry(url, "Weather(open-meteo)");
+
+  if (payload == "") {
+    Serial.println("Failed to fetch weather data.");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
+
+  if (error) {
+    Serial.println("WEATHER JSON parse error: " + String(error.c_str()));
+    return;
+  }
+
+  JsonObject hourly = doc["hourly"];
+  JsonArray tempArray = hourly["apparent_temperature"];
+  JsonArray cloudArray = hourly["cloud_cover"];
+  JsonArray precipArray = hourly["precipitation_probability"];
+
+  #if DEBUG_MODE
+    Serial.println("Sample hourly weather data:");
+    for (int i = 0; i < 25; i++) {
+      float temp = tempArray[i].as<float>();
+      int cloud = cloudArray[i].as<int>();
+      int rain = precipArray[i].as<int>();
+
+      Serial.print("Hour ");
+      Serial.print(i);
+      Serial.print(" | Temp: ");
+      Serial.print(temp, 1);
+      Serial.print(" °C, Clouds: ");
+      Serial.print(cloud);
+      Serial.print(" %, Precip: ");
+      Serial.print(rain);
+      Serial.println(" %");
+    }
+  #endif
+}
+
+// for just getting round to know if data needs re-fetching
+int fetchCurrentRound() {
+  String url = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
+  String payload = httpGetWithRetry(url, "StandingCheck(jolpi-ergastAPI)");
+
+  if (payload == "") {
+    Serial.println("Failed to fetch current round data.");
+    return -1; 
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
 
   if (error) {
     Serial.println("Round check JSON error");
     return -1;
   }
 
-  int round = (int)doc["MRData"]["StandingsTable"]["round"];
+  int round = doc["MRData"]["StandingsTable"]["round"].as<int>();
   return round;
 }
 
+// for getting all data from ergast APIs
+void refreshAllData() {
+
+  String constructorURL = "";
+  String driverURL = "";
+
+  if (ChosenSeasonYear > 0) {
+    constructorURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/constructorstandings/?format=json";
+    driverURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/driverstandings/?format=json";
+  } else {
+    constructorURL = "https://api.jolpi.ca/ergast/f1/current/constructorstandings/?format=json";
+    driverURL = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
+  }
+
+
+  fetchAndFormatStandings(constructorURL, true, constructorLines);
+  delay(1000);
+
+  fetchAndFormatStandings(driverURL, false, driverLines);
+  delay(1000);
+
+  fetchUpcomingRace();
+
+  waitingForNextData = false;
+  if (upcomingRound > 0) {
+    nextDataCheckTime = raceStart + 4 * 60 * 60;
+    waitingForNextData = true;
+
+  #if DEBUG_MODE
+      Serial.print("First standings check scheduled at: ");
+      Serial.println(ctime(&nextDataCheckTime));
+  #endif
+  }
+}
+
+// for checking if there is newer data
+void checkForNewDataIfTime() {
+  time_t now = time(nullptr);
+  if (!waitingForNextData || now < nextDataCheckTime) return;
+
+  int fetchedRound = fetchCurrentRound();
+
+  if (fetchedRound > currentRound) {
+    refreshAllData();
+  } else {
+    nextDataCheckTime = now + 1 * 60 * 60;
+  }
+}
+
+/*----------- Data fetching   -----------*/
+/*#######################################*/
+
+/*#######################################*/
+/*----------- Helper functions-----------*/
 
 // for cleaning up characters not recognised by lcd 1602
 String sanitizeForLCD(String input) {
@@ -398,12 +597,76 @@ time_t parseUtcToLocal(const char* dateStr, const char* timeStr) {
   return t;
 }
 
+// for cheching for night mode
+void checkTimeBasedNightMode() {
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo)) {
+    int hour = timeinfo.tm_hour;
+
+    bool shouldBeNight = (hour >= 23 || hour < 6);
+
+    if (shouldBeNight && !isNightMode) {
+      lcd.noBacklight();
+      isNightMode = true;
+    } else if (!shouldBeNight && isNightMode) {
+      lcd.backlight();
+      isNightMode = false;
+    }
+  }
+}
+
+// for setting up audio buzzer
+void startBuzzer() {
+  buzzerIndex = 0;
+  buzzerStartTime = millis();
+  buzzerActive = true;
+  pinMode(BUZZER_PIN, OUTPUT);
+}
+
+// for playing audio in notification stage
+void updateBuzzer() {
+  if (!buzzerActive) return;
+
+  const int NUM_NOTES = sizeof(melody) / sizeof(melody[0]);
+  unsigned long now = millis();
+
+  if (buzzerIndex >= NUM_NOTES) {
+    buzzerActive = false;
+    buzzerState = BUZZER_IDLE;
+    noTone(BUZZER_PIN);
+    return;
+  }
+
+  int noteDuration = 1100 / durations[buzzerIndex];
+  int gap = 20;  
+
+  switch (buzzerState) {
+    case BUZZER_IDLE:
+      buzzerStartTime = now;
+      buzzerState = BUZZER_PLAYING_NOTE;
+
+    case BUZZER_PLAYING_NOTE:
+      if (melody[buzzerIndex] > 0) {
+        tone(BUZZER_PIN, melody[buzzerIndex], noteDuration);
+      }
+      buzzerStartTime = now;
+      buzzerState = BUZZER_RESTING;
+      break;
+
+    case BUZZER_RESTING:
+      if (now - buzzerStartTime >= noteDuration + gap) {
+        noTone(BUZZER_PIN);
+        buzzerIndex++;
+        buzzerState = BUZZER_IDLE;
+      }
+      break;
+  }
+}
+
 // setting up wifi and taking in custom season year
 void setupWiFiAndSeason() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(180);
-
-  // Custom season year field
   WiFiManagerParameter seasonYearParam("season", "Enter F1 season year", "", 5);
   wm.addParameter(&seasonYearParam);
 
@@ -444,15 +707,15 @@ void setupWiFiAndSeason() {
   lcd.setCursor(0, 0);
   lcd.print("WiFi Connected");
   lcd.setCursor(0, 1);
-  lcd.print(WiFi.localIP().toString());
+  lcd.print("Fetching data..");
   const char* yearStr = seasonYearParam.getValue();
-  configTzTime(time_zone, ntpServer1, ntpServer2);
-  delay(1000);
+
+  fetchLocation();  // fetch and set time function inside
 
   if (yearStr != nullptr && strlen(yearStr) > 0) {
     int year = atoi(yearStr);
-    if (year >= 1950 && year <= 2125) { 
-      ChosenSeasonYear = year; 
+    if (year >= 1950 && year <= 2125) {
+      ChosenSeasonYear = year;
     }
   }
 }
@@ -469,65 +732,41 @@ void handleButtonPress() {
 
   bool reading = digitalRead(BLUE_BUTTON);
 
-  // If the button state changed (due to noise or press), reset debounce timer
   if (reading != lastButtonState) {
     lastDebounceTime = millis();
     lastButtonState = reading;
   }
 
-  // Only proceed if the button state is stable for debounceDelay
   if ((millis() - lastDebounceTime) > debounceDelay) {
     if (reading == LOW) {
-      // Button is being held
       if (!buttonWasPressed) {
         buttonDownTime = millis();
         buttonWasPressed = true;
         buttonHeld = false;
       } else if (!buttonHeld && millis() - buttonDownTime >= longPressTime) {
-        toggleNightMode();  // Trigger night mode immediately
+        isNightMode = !isNightMode;
+        if (isNightMode) {
+          lcd.noBacklight();
+        } else {
+          lcd.backlight();
+        }
         buttonHeld = true;
       }
     } else {
-      // Button released
       if (buttonWasPressed && !buttonHeld) {
-        advanceStage();  // Only trigger short press if it wasn’t already a long press
+        advanceStage();
       }
       buttonWasPressed = false;
       buttonHeld = false;
     }
   }
 }
+/*----------- Helper functions-----------*/
+/*#######################################*/
 
 
-// for toggle between night and day mode
-void toggleNightMode() {
-  isNightMode = !isNightMode;
-  if (isNightMode) {
-    lcd.noBacklight();
-    Serial.println("Night mode ON");
-  } else {
-    lcd.backlight();
-    Serial.println("Night mode OFF");
-  }
-}
-
-// for cheching for night mode
-void checkTimeBasedNightMode() {
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    int hour = timeinfo.tm_hour;
-
-    bool shouldBeNight = (hour >= 23 || hour < 6);
-
-    if (shouldBeNight && !isNightMode) {
-      lcd.noBacklight();
-      isNightMode = true;
-    } else if (!shouldBeNight && isNightMode) {
-      lcd.backlight();
-      isNightMode = false;
-    }
-  }
-}
+/*#######################################*/
+/*----------- Stages rendering-----------*/
 
 // for automaticly switching stages and notification calling
 void autoAdvanceStage() {
@@ -645,17 +884,15 @@ void renderClockStage() {
         checkTimeBasedNightMode();
         lastDateStr = dateStr;
         lcd.setCursor(0, 0);
-        lcd.print("                ");
         int datePadding = (16 - dateStr.length()) / 2;
         lcd.setCursor(datePadding, 0);
         lcd.print(dateStr);
       }
       lcd.setCursor(0, 1);
-      lcd.print("                ");
       int timePadding = (16 - timeStr.length()) / 2;
       lcd.setCursor(timePadding, 1);
       lcd.print(timeStr);
-      
+
     } else {
       lcd.setCursor(0, 0);
       lcd.print(" Time not set   ");
@@ -668,11 +905,9 @@ void renderClockStage() {
 // for displaying constructors and drivers data scrolling
 void renderScrollingStage(const String& header1, const String& header2, std::vector<String>* bodyLines, ScrollState* scroll) {
   static unsigned long showHeaderUntil = 0;
-
   const char fillChar = (char)255;
   String carSymbol = String((char)1) + String((char)2) + String((char)3) + String((char)4);
 
-  // Create scrolling ticker strings
   String topTicker = "            ";
   String bottomTicker = "                    ";
   for (size_t i = 0; i < bodyLines->size(); ++i) {
@@ -867,55 +1102,6 @@ void renderCalendarStage() {
   }
 }
 
-// for setting up audio buzzer
-void startBuzzer() {
-  buzzerIndex = 0;
-  buzzerStartTime = millis();
-  buzzerActive = true;
-  pinMode(BUZZER_PIN, OUTPUT);
-}
-
-// for playing audio in notification stage
-void updateBuzzer() {
-  if (!buzzerActive) return;
-
-  const int NUM_NOTES = sizeof(melody) / sizeof(melody[0]);
-  unsigned long now = millis();
-
-  if (buzzerIndex >= NUM_NOTES) {
-    buzzerActive = false;
-    buzzerState = BUZZER_IDLE;
-    noTone(BUZZER_PIN);
-    return;
-  }
-
-  int noteDuration = 1100 / durations[buzzerIndex];
-  int gap = 20;  // Padding between notes
-
-  switch (buzzerState) {
-    case BUZZER_IDLE:
-      buzzerStartTime = now;
-      buzzerState = BUZZER_PLAYING_NOTE;
-      // Fallthrough to start note immediately
-
-    case BUZZER_PLAYING_NOTE:
-      if (melody[buzzerIndex] > 0) {
-        tone(BUZZER_PIN, melody[buzzerIndex], noteDuration);
-      }
-      buzzerStartTime = now;
-      buzzerState = BUZZER_RESTING;
-      break;
-
-    case BUZZER_RESTING:
-      if (now - buzzerStartTime >= noteDuration + gap) {
-        noTone(BUZZER_PIN);
-        buzzerIndex++;
-        buzzerState = BUZZER_IDLE;
-      }
-      break;
-  }
-}
-
 // for dispalying notifiaction stage
 void renderNotificationStage() {
   static unsigned long startTime = 0;
@@ -1000,71 +1186,13 @@ void renderCurrentStage() {
   }
 }
 
-// for getting all data from ergast APIs
-void refreshAllData() {
+/*----------- Stages rendering-----------*/
+/*#######################################*/
 
-  String constructorURL = "";
-  String driverURL = "";
-  String calendarURL = "";
-
-  if (ChosenSeasonYear > 0) {
-    constructorURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/constructorstandings/?format=json";
-    driverURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/driverstandings/?format=json";
-    // for race calendar it probaly does not makes sense to do this way..
-    calendarURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/races/?format=json";
-  } else {
-    constructorURL = "https://api.jolpi.ca/ergast/f1/current/constructorstandings/?format=json";
-    driverURL = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
-    calendarURL = "https://api.jolpi.ca/ergast/f1/current/races/?format=json";
-  }
-
-
-  fetchAndFormatStandings(constructorURL.c_str(), true, constructorLines);
-  delay(1000);
-
-  fetchAndFormatStandings(driverURL.c_str(), false, driverLines);
-  delay(1000);
-
-  fetchUpcomingRace(calendarURL.c_str());
-
-  waitingForNextData = false;
-  if (upcomingRound > 0) {
-    setNextCheckAfterRace();
-  }
-}
-
-// for schedulling first next check
-void setNextCheckAfterRace() {
-  nextDataCheckTime = raceStart + 4 * 60 * 60;
-  waitingForNextData = true;
-  Serial.print("First standings check scheduled at: ");
-  Serial.println(ctime(&nextDataCheckTime));
-}
-
-// for checking if there is newer data
-void checkForNewDataIfTime() {
-  time_t now = time(nullptr);
-  if (!waitingForNextData || now < nextDataCheckTime) return;
-
-  String driverURL = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
-  int fetchedRound = fetchCurrentRound(driverURL.c_str());
-  if (fetchedRound == -1) {
-    Serial.println("Failed to fetch. Try again in 10 min.");
-    nextDataCheckTime = now + 10 * 60;
-    return;
-  }
-
-  if (fetchedRound > currentRound) {
-    Serial.println("New data available!");
-    refreshAllData();
-  } else {
-    Serial.println("No update yet. Retry in 1h.");
-    nextDataCheckTime = now + 1 * 60 * 60;
-  }
-}
 
 void setup() {
   Serial.begin(115200);
+
   lcd.init();
   lcd.backlight();
 
@@ -1080,12 +1208,17 @@ void setup() {
   setupWiFiAndSeason();
 
   refreshAllData();
+  fetchCurrentWeather();
 
-  Serial.println("Constructor Standings:");
-  for (String line : constructorLines) Serial.println(line);
+  lcd.clear();
 
-  Serial.println("Driver Standings:");
-  for (String line : driverLines) Serial.println(line);
+  #if DEBUG_MODE
+    Serial.println("Constructor Standings:");
+    for (String line : constructorLines) Serial.println(line);
+
+    Serial.println("Driver Standings:");
+    for (String line : driverLines) Serial.println(line);
+  #endif
 }
 
 void loop() {
