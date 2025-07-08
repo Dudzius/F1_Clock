@@ -73,50 +73,160 @@ const int durations[] = {
 };
 
 // formula 1 car made from 4 custom characters
+uint8_t formula1_1[8] = {
+  0b00110,
+  0b01100,
+  0b01100,
+  0b11111,
+  0b11111,
+  0b01100,
+  0b01100,
+  0b00110,
+};
+uint8_t formula1_2[8] = {
+  0b11100,
+  0b11101,
+  0b01011,
+  0b11111,
+  0b11111,
+  0b01011,
+  0b11101,
+  0b11100,
+};
+uint8_t formula1_3[8] = {
+  0b00000,
+  0b11110,
+  0b11111,
+  0b11111,
+  0b11111,
+  0b11111,
+  0b11110,
+  0b00000,
+};
 uint8_t formula1_4[8] = {
-  0b00110,
-  0b01100,
-  0b01100,
-  0b11111,
-  0b11111,
-  0b01100,
-  0b01100,
-  0b00110,
-};
-uint8_t formula2_4[8] = {
   0b11100,
   0b11101,
   0b01011,
-  0b11111,
-  0b11111,
+  0b11101,
+  0b11101,
   0b01011,
   0b11101,
   0b11100,
 };
-uint8_t formula3_4[8] = {
+uint8_t temperatureIcon[8] = {
+  0b00100,
+  0b01010,
+  0b01010,
+  0b01010,
+  0b01110,
+  0b11111,
+  0b11111,
+  0b01110,
+};
+uint8_t rainIcon[8] = {
+  0b00100,
+  0b00100,
+  0b01010,
+  0b01010,
+  0b10001,
+  0b10001,
+  0b10001,
+  0b01110,
+};
+uint8_t celsiusIcon[8] = {
+  0b11000,
+  0b11000,
   0b00000,
-  0b11110,
-  0b11111,
-  0b11111,
-  0b11111,
-  0b11111,
+  0b00111,
+  0b00100,
+  0b00100,
+  0b00111,
+  0b00000,
+};
+uint8_t SunIcon_1[8] = {
+  0b10000,
+  0b01001,
+  0b00011,
+  0b10110,
+  0b00110,
+  0b00011,
+  0b01001,
+  0b10000,
+};
+uint8_t SunIcon_2[8] = {
+  0b00001,
+  0b10010,
+  0b11000,
+  0b01101,
+  0b01100,
+  0b11000,
+  0b10010,
+  0b00001,
+};
+uint8_t moonIcon_1[8] = {
+  0b00000,
+  0b10001,
+  0b00011,
+  0b00110,
+  0b00110,
+  0b00011,
+  0b00001,
+  0b01000,
+};
+uint8_t moonIcon_2[8] = {
+  0b00000,
+  0b10000,
+  0b01000,
+  0b00001,
+  0b00000,
+  0b01000,
+  0b10000,
+  0b00000,
+};
+uint8_t cloudIcon_1[8] = {
+  0b00000,
+  0b00000,
+  0b00000,
+  0b01110,
+  0b10001,
+  0b10000,
+  0b01111,
+  0b00000,
+};
+uint8_t cloudIcon_2[8] = {
+  0b00000,
+  0b01110,
+  0b10001,
+  0b10001,
+  0b11001,
+  0b00001,
   0b11110,
   0b00000,
 };
-uint8_t formula4_4[8] = {
-  0b11100,
-  0b11101,
-  0b01011,
-  0b11101,
-  0b11101,
-  0b01011,
-  0b11101,
-  0b11100,
+uint8_t cloudIconFill_1[8] = {
+  0b00000,
+  0b00000,
+  0b00000,
+  0b01110,
+  0b11111,
+  0b11111,
+  0b01111,
+  0b00000,
+};
+uint8_t cloudIconFill_2[8] = {
+  0b00000,
+  0b01110,
+  0b11111,
+  0b11111,
+  0b01111,
+  0b11111,
+  0b11110,
+  0b00000,
 };
 
 int ChosenSeasonYear = 0;
 
-//HTTPClient http;
+
 const char* nameForAP = "F1_Standings";  // hotspot name
 
 // display stages for different data
@@ -124,7 +234,8 @@ enum DisplayStage { STAGE_CONSTRUCTORS,
                     STAGE_DRIVERS,
                     STAGE_CALENDAR,
                     STAGE_CLOCK,
-                    STAGE_NOTIFICATION };
+                    STAGE_NOTIFICATION,
+                    STAGE_WEATHER };
 static DisplayStage displayStage = STAGE_CLOCK;
 
 enum BuzzerState { BUZZER_IDLE,
@@ -160,12 +271,13 @@ struct ScrollState {
   int scrollSpeed = 375;
   int state = 0;
   unsigned long lastScroll = 0;
+  unsigned long startTime = 0;
 };
-ScrollState constructorScroll, driverScroll, calendarScroll;
+ScrollState constructorScroll, driverScroll, calendarScroll, weatherScroll, buzzerPlay;
+bool iconsInitialized = false;
 bool calendarFirstEntry = true;
 bool calendarScrolling = false;
 bool calendarDoneScrolling = false;
-unsigned long calendarStepStartTime = 0;
 
 // variables for time and date
 const char* ntpServer1 = "pool.ntp.org";
@@ -180,8 +292,18 @@ String lastDateStr = "";
 
 bool waitingForNextData = false;
 time_t nextDataCheckTime = 0;
+time_t nextWeatherCheckTime = 0;
 
 bool isNightMode = false;
+bool shouldBeNight = false;
+
+float currentTemp = 0;
+int currentCloud = 0;
+int currentPrecip = 0;
+
+float futureTemp = 0;
+int futureCloud = 0;
+int futurePrecip = 0;
 
 /*#######################################*/
 /*----------- Data fetching   -----------*/
@@ -446,28 +568,36 @@ void fetchCurrentWeather() {
     return;
   }
 
+  time_t now = time(nullptr);
+  struct tm *timeinfo = localtime(&now);
+  int currentHour = timeinfo->tm_hour;
+
   JsonObject hourly = doc["hourly"];
   JsonArray tempArray = hourly["apparent_temperature"];
   JsonArray cloudArray = hourly["cloud_cover"];
   JsonArray precipArray = hourly["precipitation_probability"];
 
-  #if DEBUG_MODE
-    Serial.println("Sample hourly weather data:");
-    for (int i = 0; i < 25; i++) {
-      float temp = tempArray[i].as<float>();
-      int cloud = cloudArray[i].as<int>();
-      int rain = precipArray[i].as<int>();
+  currentTemp = tempArray[currentHour];
+  currentCloud = cloudArray[currentHour];
+  currentPrecip = precipArray[currentHour];
 
-      Serial.print("Hour ");
-      Serial.print(i);
-      Serial.print(" | Temp: ");
-      Serial.print(temp, 1);
-      Serial.print(" °C, Clouds: ");
-      Serial.print(cloud);
-      Serial.print(" %, Precip: ");
-      Serial.print(rain);
-      Serial.println(" %");
-    }
+  futureTemp = tempArray[currentHour + 4];
+  futureCloud = cloudArray[currentHour + 4];
+  futurePrecip = precipArray[currentHour + 4];
+
+  #if DEBUG_MODE
+    Serial.println(url);
+    Serial.println(currentHour);
+    Serial.println("Weather data fetched:");
+    Serial.print("Now: ");
+    Serial.print(currentTemp); Serial.print("°C, ");
+    Serial.print(currentCloud); Serial.print("% clouds, ");
+    Serial.print(currentPrecip); Serial.println("% precip");
+
+    Serial.print("+4h: ");
+    Serial.print(futureTemp); Serial.print("°C, ");
+    Serial.print(futureCloud); Serial.print("% clouds, ");
+    Serial.print(futurePrecip); Serial.println("% precip");
   #endif
 }
 
@@ -531,14 +661,21 @@ void refreshAllData() {
 // for checking if there is newer data
 void checkForNewDataIfTime() {
   time_t now = time(nullptr);
-  if (!waitingForNextData || now < nextDataCheckTime) return;
 
-  int fetchedRound = fetchCurrentRound();
+  // Race round check
+  if (waitingForNextData && now >= nextDataCheckTime) {
+    int fetchedRound = fetchCurrentRound();
+    if (fetchedRound > currentRound) {
+      refreshAllData();
+    } else {
+      nextDataCheckTime = now + 60 * 60;  // Check again in 1 hour
+    }
+  }
 
-  if (fetchedRound > currentRound) {
-    refreshAllData();
-  } else {
-    nextDataCheckTime = now + 1 * 60 * 60;
+  // Weather update check
+  if (now >= nextWeatherCheckTime) {
+    fetchCurrentWeather();
+    nextWeatherCheckTime = now + 60 * 60;  // Next weather update in 1 hour
   }
 }
 
@@ -603,7 +740,7 @@ void checkTimeBasedNightMode() {
   if (getLocalTime(&timeinfo)) {
     int hour = timeinfo.tm_hour;
 
-    bool shouldBeNight = (hour >= 23 || hour < 6);
+    shouldBeNight = (hour >= 23 || hour < 6);
 
     if (shouldBeNight && !isNightMode) {
       lcd.noBacklight();
@@ -613,6 +750,17 @@ void checkTimeBasedNightMode() {
       isNightMode = false;
     }
   }
+}
+
+// for constructing a custom car symbol
+String constructCarSymbol() {
+  lcd.createChar(1, formula1_1);
+  lcd.createChar(2, formula1_2);
+  lcd.createChar(3, formula1_3);
+  lcd.createChar(4, formula1_4);
+  String carSymbol = String((char)1) + String((char)2) + String((char)3) + String((char)4);
+
+  return carSymbol;
 }
 
 // for setting up audio buzzer
@@ -812,7 +960,8 @@ void autoAdvanceStage() {
 void advanceStage() {
   lastStageChange = millis();
   switch (displayStage) {
-    case STAGE_CLOCK: displayStage = STAGE_CONSTRUCTORS; break;
+    case STAGE_CLOCK: displayStage = STAGE_WEATHER; break;
+    case STAGE_WEATHER: displayStage = STAGE_CONSTRUCTORS; break;
     case STAGE_CONSTRUCTORS: displayStage = STAGE_DRIVERS; break;
     case STAGE_DRIVERS: displayStage = STAGE_CALENDAR; break;
     case STAGE_CALENDAR: displayStage = STAGE_CLOCK; break;
@@ -838,7 +987,12 @@ void resetStageState() {
   calendarFirstEntry = true;
   calendarScrolling = false;
   calendarDoneScrolling = false;
-  calendarStepStartTime = millis();
+  calendarScroll.startTime = millis();
+
+  weatherScroll.scrollIndex = 0;
+  iconsInitialized = false;
+  weatherScroll.startTime = millis();
+  weatherScroll.lastScroll = millis();
 
   buzzerActive = false;
   lastDateStr = "";
@@ -906,7 +1060,7 @@ void renderClockStage() {
 void renderScrollingStage(const String& header1, const String& header2, std::vector<String>* bodyLines, ScrollState* scroll) {
   static unsigned long showHeaderUntil = 0;
   const char fillChar = (char)255;
-  String carSymbol = String((char)1) + String((char)2) + String((char)3) + String((char)4);
+  const String carSymbol = constructCarSymbol();
 
   String topTicker = "            ";
   String bottomTicker = "                    ";
@@ -1025,7 +1179,7 @@ void renderCalendarStage() {
       calendarScroll.scrollIndex = 0;
       calendarScrolling = false;
       calendarDoneScrolling = false;
-      calendarStepStartTime = millis();
+      calendarScroll.startTime = millis();
       calendarFirstEntry = false;
     }
 
@@ -1036,7 +1190,7 @@ void renderCalendarStage() {
     String Rname = sanitizeForLCD(raceName) + "  |  " + whenStr;
     int maxScroll = max(0, (int)Rname.length() - 16);
 
-    if (!calendarScrolling && millis() - calendarStepStartTime < initialHold) {
+    if (!calendarScrolling && millis() - calendarScroll.startTime < initialHold) {
       lcd.setCursor(0, 1);
       lcd.print(Rname.substring(0, 16));
       return;
@@ -1044,29 +1198,29 @@ void renderCalendarStage() {
 
     if (!calendarScrolling) {
       calendarScrolling = true;
-      calendarStepStartTime = millis();
+      calendarScroll.startTime = millis();
     }
 
-    if (calendarScrolling && !calendarDoneScrolling && millis() - calendarStepStartTime >= calendarScroll.scrollSpeed) {
-      calendarStepStartTime = millis();
+    if (calendarScrolling && !calendarDoneScrolling && millis() - calendarScroll.startTime >= calendarScroll.scrollSpeed) {
+      calendarScroll.startTime = millis();
       lcd.setCursor(0, 1);
       lcd.print(Rname.substring(calendarScroll.scrollIndex, calendarScroll.scrollIndex + 16));
       calendarScroll.scrollIndex++;
 
       if (calendarScroll.scrollIndex > maxScroll) {
         calendarDoneScrolling = true;
-        calendarStepStartTime = millis();
+        calendarScroll.startTime = millis();
       }
       return;
     }
 
-    if (calendarDoneScrolling && millis() - calendarStepStartTime < initialHold) {
+    if (calendarDoneScrolling && millis() - calendarScroll.startTime < initialHold) {
       lcd.setCursor(0, 1);
       lcd.print(Rname.substring(maxScroll, maxScroll + 16));
       return;
     }
 
-    if (calendarDoneScrolling && millis() - calendarStepStartTime >= initialHold) {
+    if (calendarDoneScrolling && millis() - calendarScroll.startTime >= initialHold) {
       lcd.clear();
       calendarScroll.state = 1;
       calendarFirstEntry = true;
@@ -1076,7 +1230,7 @@ void renderCalendarStage() {
 
   if (calendarScroll.state == 1) {
     if (calendarFirstEntry) {
-      calendarStepStartTime = millis();
+      calendarScroll.startTime = millis();
       lcd.clear();
       calendarFirstEntry = false;
     }
@@ -1094,7 +1248,7 @@ void renderCalendarStage() {
     lcd.setCursor(0, 1);
     lcd.print(qualiTimeStr);
 
-    if (millis() - calendarStepStartTime >= timeDisplayDuration) {
+    if (millis() - calendarScroll.startTime >= timeDisplayDuration) {
       calendarScroll.state = 0;
       calendarFirstEntry = true;
       advanceStage();
@@ -1114,7 +1268,7 @@ void renderNotificationStage() {
   const unsigned long scrollInterval = 200;
   const unsigned long blinkInterval = 500;
 
-  String carSymbol = String((char)1) + String((char)2) + String((char)3) + String((char)4);
+  const String carSymbol = constructCarSymbol();
   String carLine = "";
 
   while (carLine.length() < 48) {
@@ -1165,6 +1319,73 @@ void renderNotificationStage() {
   updateBuzzer();
 }
 
+// for displaying weather data
+void renderWeatherStage() {
+  if (!iconsInitialized) {
+    weatherScroll.startTime = millis();
+    lcd.createChar(1, temperatureIcon);
+    lcd.createChar(2, rainIcon);
+    lcd.createChar(3, celsiusIcon);
+
+    auto setCloudIcons = [](int base, int cloud, bool isNight) {
+      if (cloud < 30) {
+        lcd.createChar(base, isNight ? moonIcon_1 : SunIcon_1);
+        lcd.createChar(base + 1, isNight ? moonIcon_2 : SunIcon_2);
+      } else if (cloud < 70) {
+        lcd.createChar(base, cloudIcon_1);
+        lcd.createChar(base + 1, cloudIcon_2);
+      } else {
+        lcd.createChar(base, cloudIconFill_1);
+        lcd.createChar(base + 1, cloudIconFill_2);
+      }
+    };
+
+    setCloudIcons(4, currentCloud, shouldBeNight);
+    setCloudIcons(6, futureCloud, shouldBeNight);
+
+    iconsInitialized = true;
+  }
+
+  const String tempSymbol = String((char)1);
+  const String rainSymbol = String((char)2);
+  const String celsiusSymbol = String((char)3);
+  const String weatherSymbol = String((char)4) + String((char)5);
+  const String futureSymbol = String((char)6) + String((char)7);
+
+  String header1 = "Now: ";
+  String header2 = "+4h: ";
+
+  // Dynamic weather info (scrollable part)
+  String scrollData1 = weatherSymbol + "  " + tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + currentPrecip + "%";
+  String scrollData2 = futureSymbol + "  " + tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + futurePrecip + "%";
+
+  // Repeat scroll data to loop cleanly
+  String paddedScroll1 = "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1;
+  String paddedScroll2 = "    " + scrollData2 + "    " + scrollData2 + "    " + scrollData2 + "    " + scrollData2;
+
+  const int scrollAreaWidth = 16 - header1.length();
+
+  if (millis() - weatherScroll.lastScroll >= weatherScroll.scrollSpeed) {
+    lcd.setCursor(0, 0);
+    lcd.print(header1);
+    lcd.print(paddedScroll1.substring(weatherScroll.scrollIndex, weatherScroll.scrollIndex + scrollAreaWidth));
+
+    lcd.setCursor(0, 1);
+    lcd.print(header2);
+    lcd.print(paddedScroll2.substring(weatherScroll.scrollIndex, weatherScroll.scrollIndex + scrollAreaWidth));
+
+    // advance shared scroll index
+    weatherScroll.scrollIndex = (weatherScroll.scrollIndex + 1) %
+                                min(paddedScroll1.length(), paddedScroll2.length() - scrollAreaWidth + 1);
+    weatherScroll.lastScroll = millis();
+  }
+
+  // Reset and advance stage after timeout
+  if (millis() - weatherScroll.startTime > 20000) {
+    advanceStage();
+  }
+}
+
 // for rendering current stage
 void renderCurrentStage() {
   switch (displayStage) {
@@ -1183,28 +1404,21 @@ void renderCurrentStage() {
     case STAGE_NOTIFICATION:
       renderNotificationStage();
       break;
+    case STAGE_WEATHER:
+      renderWeatherStage();
+      break;
   }
 }
 
 /*----------- Stages rendering-----------*/
 /*#######################################*/
 
-
 void setup() {
   Serial.begin(115200);
-
   lcd.init();
   lcd.backlight();
-
-  // creating custom characters for Formula1 car emoji
-  lcd.createChar(1, formula1_4);
-  lcd.createChar(2, formula2_4);
-  lcd.createChar(3, formula3_4);
-  lcd.createChar(4, formula4_4);
-
   pinMode(BLUE_BUTTON, INPUT_PULLUP);
 
-  // Connect and get season year
   setupWiFiAndSeason();
 
   refreshAllData();
