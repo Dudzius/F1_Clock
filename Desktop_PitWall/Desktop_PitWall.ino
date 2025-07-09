@@ -1,6 +1,6 @@
 #include <WiFiManager.h>        // https://github.com/tzapu/WiFiManager
 #include <ArduinoJson.h>        // https://github.com/bblanchon/ArduinoJson
-#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C //Archived
+#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C 
 #include <HTTPClient.h>
 #include <time.h>
 #include <Wire.h>
@@ -9,11 +9,6 @@
 #define BLUE_BUTTON 15
 #define BUZZER_PIN 4
 
-#define NOTE_C4 262
-#define NOTE_D4 294
-#define NOTE_E4 330
-#define NOTE_F4 349
-#define NOTE_G4 392
 #define NOTE_A4 440
 #define NOTE_B4 494
 #define REST 0
@@ -22,57 +17,15 @@
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// for notification melody (not the most pleasent sound but good enough)
-const int melody[] = {
-  /*REST, NOTE_A4, NOTE_A4, NOTE_A4, REST, 
-  NOTE_E4, NOTE_E4,            
-  NOTE_E4, NOTE_G4, NOTE_E4,  REST,    */
-
-  /*REST, NOTE_E4, NOTE_E4, 
-  NOTE_E4, NOTE_D4, NOTE_F4, REST,
-
-  NOTE_A4, NOTE_A4, NOTE_B4, NOTE_C4, NOTE_A4,  
-  NOTE_G4, NOTE_G4, NOTE_E4, NOTE_F4,   */
-
-  NOTE_A4, NOTE_A4, NOTE_B4, NOTE_C4, NOTE_A4,
-  NOTE_G4, NOTE_G4, NOTE_C4, NOTE_D4,
-
-  NOTE_D4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_D4,
-  NOTE_C4, NOTE_C4, NOTE_A4, NOTE_B4,
-
-  NOTE_D4, NOTE_D4, NOTE_E4, NOTE_F4, NOTE_D4,
-  NOTE_C4, NOTE_C4, NOTE_E4, NOTE_F4,
-
-  NOTE_A4, NOTE_A4, NOTE_A4, REST,
-  NOTE_A4, NOTE_A4,
-  NOTE_A4, NOTE_G4, NOTE_B4, REST
+// for notification alert
+const int v2melody[] = {
+  REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_B4
 };
-const int durations[] = {
-  /*4,3,3,3,4,
-  3,3,
-  5,5,5,4,*/
-
-  /*4,4,4,
-  6,6,2,4,
-
-  2,2,6,6,6,
-  2,2,2,1,*/
-
-  2, 2, 6, 6, 6,
-  2, 2, 2, 1,
-
-  2, 2, 6, 6, 6,
-  2, 2, 2, 1,
-
-  2, 2, 6, 6, 6,
-  2, 2, 2, 1,
-
-  4, 4, 4, 2,
-  4, 4,
-  6, 6, 2, 2
+const int v2durations[] = {
+ 4,4,4,4,4,4,4,4,4,2
 };
 
-// formula 1 car made from 4 custom characters
+// custom characters
 uint8_t formula1_1[8] = {
   0b00110,
   0b01100,
@@ -224,9 +177,6 @@ uint8_t cloudIconFill_2[8] = {
   0b00000,
 };
 
-int ChosenSeasonYear = 0;
-
-
 const char* nameForAP = "F1_Standings";  // hotspot name
 
 // display stages for different data
@@ -242,19 +192,15 @@ enum BuzzerState { BUZZER_IDLE,
                    BUZZER_PLAYING_NOTE,
                    BUZZER_RESTING };
 BuzzerState buzzerState = BUZZER_IDLE;
-int buzzerIndex = 0;
-unsigned long buzzerStartTime = 0;
-bool buzzerActive = false;
-
 bool raceNotified = false;
 bool qualiNotified = false;
 bool predictionNotified = false;
 String notificationMsg = "";
 
 unsigned long lastStageChange = 0;
-const unsigned long stageInterval = 15UL * 60UL * 1000UL;
 
 // variables for data
+int ChosenSeasonYear = 0;
 int seasonYear = 0;
 int currentRound = 0;
 int upcomingRound = 0;
@@ -273,7 +219,7 @@ struct ScrollState {
   unsigned long lastScroll = 0;
   unsigned long startTime = 0;
 };
-ScrollState constructorScroll, driverScroll, calendarScroll, weatherScroll, buzzerPlay;
+ScrollState constructorScroll, driverScroll, calendarScroll, weatherScroll, buzzerPlay, notificationScroll;
 bool iconsInitialized = false;
 bool calendarFirstEntry = true;
 bool calendarScrolling = false;
@@ -282,13 +228,15 @@ bool calendarDoneScrolling = false;
 // variables for time and date
 const char* ntpServer1 = "pool.ntp.org";
 const char* ntpServer2 = "time.nist.gov";
-const char* time_zone = "EET-2EEST,M3.5.0/3,M10.5.0/4";  //Europe/Vilnius // TODO remove
 long utcOffsetSeconds = 0;
 String cityName;
 String ipAddress;
 float latitude = 0.0;
 float longitude = 0.0;
 String lastDateStr = "";
+
+unsigned long lastBlinkTime = 0;
+bool textVisible = true;
 
 bool waitingForNextData = false;
 time_t nextDataCheckTime = 0;
@@ -339,11 +287,15 @@ String httpGetWithRetry(const String& url, String requestedBy) {
 }
 
 // for getting upcoming race data to display
-void fetchUpcomingRace() {
-  String url = "https://api.jolpi.ca/ergast/f1/current/races/?format=json";
+void fetchUpcomingRace(const String& url) {
   String payload = httpGetWithRetry(url, "Calendar(jolpi-ergastAPI)");
 
   if (payload == "") {
+    lcd.setCursor(0, 0);
+    lcd.print("CALENDAR NOT SET");
+    lcd.setCursor(0, 1);
+    lcd.print("RESET THE DEVICE");
+    delay(1000);
     Serial.println("Failed to fetch calendar data.");
     return;
   }
@@ -374,7 +326,7 @@ void fetchUpcomingRace() {
   JsonArray raceList = racesObject["RaceTable"]["Races"].as<JsonArray>();
 
   if (currentRound >= totalRounds) {
-    raceErrorMsg = "No upcoming races";
+    raceErrorMsg = "No upcoming race";
     return;
   }
   for (JsonObject raceItem : raceList) {
@@ -400,6 +352,11 @@ void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<
   String payload = httpGetWithRetry(url, "Standings(jolpi-ergastAPI)");
 
   if (payload == "") {
+    lcd.setCursor(0, 0);
+    lcd.print("STANDING NOT SET");
+    lcd.setCursor(0, 1);
+    lcd.print("RESET THE DEVICE");
+    delay(1000);
     if (isConstructor) {
       Serial.println("Failed to fetch constructors standings data.");
     } else {
@@ -474,6 +431,11 @@ void fetchLocation() {
   String payload = httpGetWithRetry(url, "Location(ipAPI)");
 
   if (payload == "") {
+    lcd.setCursor(0, 0);
+    lcd.print("LOCATION NOT SET");
+    lcd.setCursor(0, 1);
+    lcd.print("RESET THE DEVICE");
+    delay(1000);
     Serial.println("Failed to fetch location data.");
     return;
   }
@@ -517,6 +479,11 @@ void fetchAndSetTimezone() {
   String payload = httpGetWithRetry(url, "Timezone(worldTimeAPI)");
 
   if (payload == "") {
+    lcd.setCursor(0, 0);
+    lcd.print("TIMEZONE NOT SET");
+    lcd.setCursor(0, 1);
+    lcd.print("RESET THE DEVICE");
+    delay(1000);
     Serial.println("Failed to fetch timezone data.");
     return;
   }
@@ -556,6 +523,11 @@ void fetchCurrentWeather() {
   String payload = httpGetWithRetry(url, "Weather(open-meteo)");
 
   if (payload == "") {
+    lcd.setCursor(0, 0);
+    lcd.print("WEATHER  NOT SET");
+    lcd.setCursor(0, 1);
+    lcd.print("RESET THE DEVICE");
+    delay(1000);
     Serial.println("Failed to fetch weather data.");
     return;
   }
@@ -628,13 +600,16 @@ void refreshAllData() {
 
   String constructorURL = "";
   String driverURL = "";
+  String raceURL = "";
 
   if (ChosenSeasonYear > 0) {
     constructorURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/constructorstandings/?format=json";
     driverURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/driverstandings/?format=json";
+    raceURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/races/?format=json";
   } else {
     constructorURL = "https://api.jolpi.ca/ergast/f1/current/constructorstandings/?format=json";
     driverURL = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
+    raceURL = "https://api.jolpi.ca/ergast/f1/current/races/?format=json";
   }
 
 
@@ -644,7 +619,7 @@ void refreshAllData() {
   fetchAndFormatStandings(driverURL, false, driverLines);
   delay(1000);
 
-  fetchUpcomingRace();
+  fetchUpcomingRace(raceURL);
 
   waitingForNextData = false;
   if (upcomingRound > 0) {
@@ -719,19 +694,18 @@ String sanitizeForLCD(String input) {
   return input;
 }
 
-// for setting upcomming race time to local - VILNIUS
+// for setting upcomming race time to local
 time_t parseUtcToLocal(const char* dateStr, const char* timeStr) {
   struct tm tm = {};
-  strptime(String(dateStr + String("T") + timeStr).c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
+  String isoString = String(dateStr) + "T" + String(timeStr);
+  strptime(isoString.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
   tm.tm_isdst = -1;
 
-  setenv("TZ", "UTC0", 1);
-  tzset();
-  time_t t = mktime(&tm);
+  // Get time as UTC
+  time_t utcTime = mktime(&tm);
 
-  setenv("TZ", time_zone, 1);
-  tzset();
-  return t;
+  // Apply dynamic UTC offset
+  return utcTime + utcOffsetSeconds;
 }
 
 // for cheching for night mode
@@ -765,46 +739,51 @@ String constructCarSymbol() {
 
 // for setting up audio buzzer
 void startBuzzer() {
-  buzzerIndex = 0;
-  buzzerStartTime = millis();
-  buzzerActive = true;
+  buzzerPlay.scrollIndex = 0;
+  buzzerPlay.startTime = millis();
+  buzzerPlay.state = 1;
   pinMode(BUZZER_PIN, OUTPUT);
 }
 
 // for playing audio in notification stage
 void updateBuzzer() {
-  if (!buzzerActive) return;
+  if (buzzerPlay.state == 0) return;
 
-  const int NUM_NOTES = sizeof(melody) / sizeof(melody[0]);
+  //const int NUM_NOTES = sizeof(melody) / sizeof(melody[0]);
+  const int NUM_NOTES = sizeof(v2melody) / sizeof(v2melody[0]);
   unsigned long now = millis();
 
-  if (buzzerIndex >= NUM_NOTES) {
-    buzzerActive = false;
+  if (buzzerPlay.scrollIndex >= NUM_NOTES) {
+    buzzerPlay.state = 0;
     buzzerState = BUZZER_IDLE;
     noTone(BUZZER_PIN);
     return;
   }
 
-  int noteDuration = 1100 / durations[buzzerIndex];
+  //int noteDuration = 1100 / durations[buzzerPlay.scrollIndex];
+  int noteDuration = 1000 / v2durations[buzzerPlay.scrollIndex];
   int gap = 20;  
 
   switch (buzzerState) {
     case BUZZER_IDLE:
-      buzzerStartTime = now;
+      buzzerPlay.startTime = now;
       buzzerState = BUZZER_PLAYING_NOTE;
 
     case BUZZER_PLAYING_NOTE:
-      if (melody[buzzerIndex] > 0) {
-        tone(BUZZER_PIN, melody[buzzerIndex], noteDuration);
+    //  if (melody[buzzerPlay.scrollIndex] > 0) {
+    //    tone(BUZZER_PIN, melody[buzzerPlay.scrollIndex], noteDuration);
+    //  }
+      if (v2melody[buzzerPlay.scrollIndex] > 0) {
+        tone(BUZZER_PIN, v2melody[buzzerPlay.scrollIndex], noteDuration);
       }
-      buzzerStartTime = now;
+      buzzerPlay.startTime = now;
       buzzerState = BUZZER_RESTING;
       break;
 
     case BUZZER_RESTING:
-      if (now - buzzerStartTime >= noteDuration + gap) {
+      if (now - buzzerPlay.startTime >= noteDuration + gap) {
         noTone(BUZZER_PIN);
-        buzzerIndex++;
+        buzzerPlay.scrollIndex++;
         buzzerState = BUZZER_IDLE;
       }
       break;
@@ -918,6 +897,7 @@ void handleButtonPress() {
 
 // for automaticly switching stages and notification calling
 void autoAdvanceStage() {
+  const unsigned long stageInterval = 15UL * 60UL * 1000UL;
   time_t now = time(NULL);
   const time_t fiveMinutes = 5 * 60;
   const time_t oneHour = 60 * 60;
@@ -994,8 +974,15 @@ void resetStageState() {
   weatherScroll.startTime = millis();
   weatherScroll.lastScroll = millis();
 
-  buzzerActive = false;
+  buzzerPlay.state = 0;
+  buzzerPlay.scrollIndex = 0;
+  buzzerPlay.startTime = millis();
   lastDateStr = "";
+  lastBlinkTime = 0;
+  textVisible = true;
+  notificationScroll.scrollIndex = 0;
+  notificationScroll.startTime = millis();
+  notificationScroll.lastScroll = millis();
   lcd.clear();
 }
 
@@ -1258,28 +1245,23 @@ void renderCalendarStage() {
 
 // for dispalying notifiaction stage
 void renderNotificationStage() {
-  static unsigned long startTime = 0;
-  static unsigned long lastScrollTime = 0;
-  static unsigned long lastBlinkTime = 0;
-  static int scrollIndex = 0;
-  static bool textVisible = true;
 
-  const unsigned long duration = 30000;
-  const unsigned long scrollInterval = 200;
+
+  const unsigned long duration = 15000;
   const unsigned long blinkInterval = 500;
 
   const String carSymbol = constructCarSymbol();
   String carLine = "";
 
-  while (carLine.length() < 48) {
+  while (carLine.length() < 20) {
     carLine += carSymbol + "    ";
   }
 
-  if (startTime == 0) {
-    startTime = millis();
-    lastScrollTime = millis();
+  if (notificationScroll.startTime == 0) {
+    notificationScroll.startTime = millis();
+    notificationScroll.lastScroll = millis();
     lastBlinkTime = millis();
-    scrollIndex = 0;
+    notificationScroll.scrollIndex = 0;
     textVisible = true;
     lcd.clear();
     startBuzzer();
@@ -1289,21 +1271,21 @@ void renderNotificationStage() {
 
   unsigned long now = millis();
 
-  if (now - startTime > duration) {
-    startTime = 0;
+  if (now - notificationScroll.startTime > duration) {
+    notificationScroll.startTime = 0;
     notificationMsg = "";
     advanceStage();
     return;
   }
 
-  if (now - lastScrollTime >= scrollInterval) {
+  if (now - notificationScroll.lastScroll >= notificationScroll.scrollSpeed) {
     lcd.setCursor(0, 0);
-    lcd.print(carLine.substring(scrollIndex, scrollIndex + 16));
-    scrollIndex++;
-    if (scrollIndex > carLine.length() - 16) {
-      scrollIndex = 0;
+    lcd.print(carLine.substring(notificationScroll.scrollIndex, notificationScroll.scrollIndex + 16));
+    notificationScroll.scrollIndex++;
+    if (notificationScroll.scrollIndex > carLine.length() - 16) {
+      notificationScroll.scrollIndex = 0;
     }
-    lastScrollTime = now;
+    notificationScroll.lastScroll = now;
   }
 
   if (now - lastBlinkTime >= blinkInterval) {
@@ -1355,13 +1337,12 @@ void renderWeatherStage() {
   String header1 = "Now: ";
   String header2 = "+4h: ";
 
-  // Dynamic weather info (scrollable part)
-  String scrollData1 = weatherSymbol + "  " + tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + currentPrecip + "%";
-  String scrollData2 = futureSymbol + "  " + tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + futurePrecip + "%";
+  String scrollData1 = weatherSymbol + " " + currentCloud + "%  " + tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + currentPrecip + "%";
+  String scrollData2 = futureSymbol + " " + futureCloud + "%  " + tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + futurePrecip + "%";
 
-  // Repeat scroll data to loop cleanly
-  String paddedScroll1 = "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1;
-  String paddedScroll2 = "    " + scrollData2 + "    " + scrollData2 + "    " + scrollData2 + "    " + scrollData2;
+
+  String paddedScroll1 = "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1;
+  String paddedScroll2 = "    " + scrollData2 + "    " + scrollData2 + "    " + scrollData2;
 
   const int scrollAreaWidth = 16 - header1.length();
 
@@ -1374,14 +1355,11 @@ void renderWeatherStage() {
     lcd.print(header2);
     lcd.print(paddedScroll2.substring(weatherScroll.scrollIndex, weatherScroll.scrollIndex + scrollAreaWidth));
 
-    // advance shared scroll index
-    weatherScroll.scrollIndex = (weatherScroll.scrollIndex + 1) %
-                                min(paddedScroll1.length(), paddedScroll2.length() - scrollAreaWidth + 1);
+    weatherScroll.scrollIndex = (weatherScroll.scrollIndex + 1) % min(paddedScroll1.length(), paddedScroll2.length() - scrollAreaWidth + 1);
     weatherScroll.lastScroll = millis();
   }
 
-  // Reset and advance stage after timeout
-  if (millis() - weatherScroll.startTime > 20000) {
+  if (millis() - weatherScroll.startTime > 23000) {
     advanceStage();
   }
 }
