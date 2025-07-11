@@ -20,13 +20,25 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 ---
 ## Demo:
 
-> (Coming soon – screenshots and short video)
+- STAGE 1 - Clock
+![clock](https://github.com/user-attachments/assets/ae5bdd79-e20c-441e-b0d2-5abbc29cd828)
 
-- STAGE 1 - Clock insert photo/gif
-- STAGE 2 - Weather insert photo/gif
-- STAGE 3 - Constructors standings insert photo/gif
-- STAGE 4 - Drivers standings insert photo/gif\
-- STAGE 5 - Calendar insert photo/gif
+- STAGE 2 - Weather data
+![weather](https://github.com/user-attachments/assets/961131d6-b606-4780-9fb1-bf9bf2337a8a)
+
+- STAGE 3 - Constructors standings
+![constructors](https://github.com/user-attachments/assets/e74b194a-3e97-42cd-8104-cdb90de9ef1f)
+![constructorsBody](https://github.com/user-attachments/assets/4f9f0856-ff92-4627-b4eb-b3e01d2656ab)
+
+- STAGE 4 - Drivers standings
+![drivers](https://github.com/user-attachments/assets/22f30f33-da14-4ad4-8e7e-fe8f13d3240d)
+![driversBody](https://github.com/user-attachments/assets/a8b86491-5943-4a12-b4ac-9ad88757cf02)
+
+
+- STAGE 5 - Calendar (upcoming race)
+![race1](https://github.com/user-attachments/assets/61e7b43b-bfe8-43f1-a17e-d11af61ebb4e)
+![race2](https://github.com/user-attachments/assets/d689b8a7-29e4-476e-86d2-608f569f54c6)
+
 
 ---
 ## Hardware:
@@ -39,7 +51,8 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 ---
 ## Scematics:
 
-> (Coming soon – image)
+<img width="2696" height="1614" alt="circuit" src="https://github.com/user-attachments/assets/71d610ac-b5ee-45d6-b277-b2d08eedb4fc" />
+
 
 ---
 ## How it works
@@ -83,11 +96,10 @@ Huge shoutout to the folks at [jolpica-f1](https://github.com/jolpica/jolpica-f1
 
 Thanks to [WiFiManager](https://github.com/tzapu/WiFiManager) for making Wi-Fi setup super friendly. 🏆
 
-> This is my first month playing with electronics and Arduino IDE, so the project’s a bit rough.
+>  I'm not much of software engineer and this is my first microcontroler project, so it is a bit rough :)
 
 ---
 
 Made with 🧡 for Formula 1 fans.
 
-Contributions, bug reports, and feedback are welcome.  
-Open an issue or get in touch!
+Any feedback is welcome.
