@@ -229,7 +229,6 @@ bool calendarDoneScrolling = false;
 const char* ntpServer1 = "pool.ntp.org";
 const char* ntpServer2 = "time.nist.gov";
 long utcOffsetSeconds = 0;
-String cityName;
 String ipAddress;
 float latitude = 0.0;
 float longitude = 0.0;
@@ -448,17 +447,12 @@ void fetchLocation() {
     return;
   }
 
-  const char* timezone = doc["timezone"];
-  cityName = doc["city"].as<String>();
   latitude = doc["lat"].as<float>();
   longitude = doc["lon"].as<float>();
   ipAddress = doc["query"].as<String>();
 
   #if DEBUG_MODE
-    Serial.print("Setting timezone: ");
-    Serial.println(timezone);
     Serial.print("Location: ");
-    Serial.print(cityName);
     Serial.print(" (");
     Serial.print(latitude, 4);
     Serial.print(", ");
@@ -748,8 +742,6 @@ void startBuzzer() {
 // for playing audio in notification stage
 void updateBuzzer() {
   if (buzzerPlay.state == 0) return;
-
-  //const int NUM_NOTES = sizeof(melody) / sizeof(melody[0]);
   const int NUM_NOTES = sizeof(v2melody) / sizeof(v2melody[0]);
   unsigned long now = millis();
 
@@ -770,9 +762,6 @@ void updateBuzzer() {
       buzzerState = BUZZER_PLAYING_NOTE;
 
     case BUZZER_PLAYING_NOTE:
-    //  if (melody[buzzerPlay.scrollIndex] > 0) {
-    //    tone(BUZZER_PIN, melody[buzzerPlay.scrollIndex], noteDuration);
-    //  }
       if (v2melody[buzzerPlay.scrollIndex] > 0) {
         tone(BUZZER_PIN, v2melody[buzzerPlay.scrollIndex], noteDuration);
       }
