@@ -1,4 +1,4 @@
-# 🏎️ Desktop F1 Pitwall
+# 🏎️ F1 Desktop Pitwall
 
 A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, weather info, and local time — with automatic updates and notifications.
 
