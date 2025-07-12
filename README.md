@@ -42,12 +42,13 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 ## Hardware:
 **Components Used:**
 - ESP32 DevKit V1
-- 16x4 I2C LCD Display (green & blue)
+- 16x4 I2C LCD Display
 - Buzzer
 - Push Button
+- Wires
 
 
-## Scematics:
+## Schematics:
 
 <img width="2696" height="1614" alt="circuit" src="https://github.com/user-attachments/assets/71d610ac-b5ee-45d6-b277-b2d08eedb4fc" />
 
@@ -83,7 +84,7 @@ The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driv
 - Weather is refreshed every hour
 - F1 data is refreshed 2 hours after a race completes
 - Notifications are triggered before race/quali sessions
-- LCD enters night mode (off) between 23:00–06:00 unless overridden
+- LCD enters night mode (backlight off) between 23:00–06:00
 
 Short and long button presses are used for navigation and toggling night mode. No user interaction is required after setup.
 
@@ -91,7 +92,7 @@ Short and long button presses are used for navigation and toggling night mode. N
 
 Huge shoutout to the folks at [jolpica-f1](https://github.com/jolpica/jolpica-f1) for awesome open-source F1 API! 🏆  
 
-Thanks to [WiFiManager](https://github.com/tzapu/WiFiManager) for making Wi-Fi setup super friendly. 🏆
+Thanks to [WiFiManager](https://github.com/tzapu/WiFiManager) for making WiFi super easy to setup. 🏆
 
 >  I'm not much of software engineer and this is my first microcontroler project, so it is a bit rough :)
 
