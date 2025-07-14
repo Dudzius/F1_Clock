@@ -50,7 +50,7 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 
 ## Schematics:
 
-<img width="2696" height="1614" alt="circuit" src="https://github.com/user-attachments/assets/71d610ac-b5ee-45d6-b277-b2d08eedb4fc" />
+<img width="2697" height="1614" alt="circuit_image(1)" src="https://github.com/user-attachments/assets/161179e5-e23e-4803-a1bb-a9f2685a816d" />
 
 
 ## How it works
