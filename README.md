@@ -1,9 +1,9 @@
-# 🏎️ Desktop F1 Pitwall
+# 🏎️ F1 Desktop Pitwall
 
 A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, weather info, and local time — with automatic updates and notifications.
 
  
----
+
 ## Features
 
 - **Stage 1** – Current date and time  
@@ -17,7 +17,7 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 - Easy one-time Wi-Fi setup  
 - On-screen error messages when data fetching fails  
 
----
+
 ## Demo:
 
 - STAGE 1 - Clock
@@ -34,27 +34,25 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 ![drivers](https://github.com/user-attachments/assets/22f30f33-da14-4ad4-8e7e-fe8f13d3240d)
 ![driversBody](https://github.com/user-attachments/assets/a8b86491-5943-4a12-b4ac-9ad88757cf02)
 
-
 - STAGE 5 - Calendar (upcoming race)
 ![race1](https://github.com/user-attachments/assets/61e7b43b-bfe8-43f1-a17e-d11af61ebb4e)
 ![race2](https://github.com/user-attachments/assets/d689b8a7-29e4-476e-86d2-608f569f54c6)
 
 
----
 ## Hardware:
 **Components Used:**
 - ESP32 DevKit V1
-- 16x4 I2C LCD Display (green & blue)
+- 16x4 I2C LCD Display
 - Buzzer
 - Push Button
-
----
-## Scematics:
-
-<img width="2696" height="1614" alt="circuit" src="https://github.com/user-attachments/assets/71d610ac-b5ee-45d6-b277-b2d08eedb4fc" />
+- Wires
 
 
----
+## Schematics:
+
+<img width="2697" height="1614" alt="circuit_image(1)" src="https://github.com/user-attachments/assets/161179e5-e23e-4803-a1bb-a9f2685a816d" />
+
+
 ## How it works
 
 ### Setup
@@ -86,7 +84,7 @@ The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driv
 - Weather is refreshed every hour
 - F1 data is refreshed 2 hours after a race completes
 - Notifications are triggered before race/quali sessions
-- LCD enters night mode (off) between 23:00–06:00 unless overridden
+- LCD enters night mode (backlight off) between 23:00–06:00
 
 Short and long button presses are used for navigation and toggling night mode. No user interaction is required after setup.
 
@@ -94,7 +92,7 @@ Short and long button presses are used for navigation and toggling night mode. N
 
 Huge shoutout to the folks at [jolpica-f1](https://github.com/jolpica/jolpica-f1) for awesome open-source F1 API! 🏆  
 
-Thanks to [WiFiManager](https://github.com/tzapu/WiFiManager) for making Wi-Fi setup super friendly. 🏆
+Thanks to [WiFiManager](https://github.com/tzapu/WiFiManager) for making WiFi super easy to setup. 🏆
 
 >  I'm not much of software engineer and this is my first microcontroler project, so it is a bit rough :)
 
