@@ -13,7 +13,7 @@
 #define NOTE_B4 494
 #define REST 0
 
-#define DEBUG_MODE 1  // Set to false to disable all Serial prints
+#define DEBUG_MODE 0  // Set to 0 to disable all Serial prints for debugging
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -177,7 +177,7 @@ uint8_t cloudIconFill_2[8] = {
   0b00000,
 };
 
-const char* nameForAP = "F1_Standings";  // hotspot name
+const char* nameForAP = "F1_PITWALL";  // hotspot name
 
 // display stages for different data
 enum DisplayStage { STAGE_CONSTRUCTORS,
@@ -196,6 +196,7 @@ bool raceNotified = false;
 bool qualiNotified = false;
 bool predictionNotified = false;
 String notificationMsg = "";
+int noConnection = 0;
 
 unsigned long lastStageChange = 0;
 
@@ -381,6 +382,7 @@ void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<
     filterStandingsArrayItem.createNestedObject("Constructor")["name"] = true;
   } else {
     filterStandingsArrayItem.createNestedObject("Driver")["code"] = true;
+    filterStandingsArrayItem.createNestedObject("Driver")["driverId"] = true;
   }
 
   JsonDocument doc;
@@ -407,10 +409,17 @@ void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<
     String line = "P" + String(standingData["position"].as<int>()) + " ";
 
     if (isConstructor) {
-      line += String(standingData["Constructor"]["name"].as<const char*>());
+    line += String(standingData["Constructor"]["name"].as<const char*>());
+  } else {
+    const char* code = standingData["Driver"]["code"] | nullptr;
+    const char* driverId = standingData["Driver"]["driverId"] | "???";
+
+    if (code && strlen(code) > 0) {
+      line += String(code);
     } else {
-      line += String(standingData["Driver"]["code"].as<const char*>());
+      line += String(driverId);
     }
+  }
 
     line += " ";
     int wins = standingData["wins"].as<int>();  //saving space by only showing more then 0 wins
@@ -785,7 +794,7 @@ void setupWiFiAndSeason() {
   wm.setConfigPortalTimeout(180);
   WiFiManagerParameter seasonYearParam("season", "Enter F1 season year", "", 5);
   wm.addParameter(&seasonYearParam);
-
+  bool connected = false;
   bool forcePortal = false;
 
   if (digitalRead(BLUE_BUTTON) == LOW) {
@@ -806,33 +815,48 @@ void setupWiFiAndSeason() {
   if (!forcePortal) {
     WiFi.begin();
     unsigned long startAttemptTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 8000) delay(500);
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 8000) {
+      delay(500);
+    }
+    connected = (WiFi.status() == WL_CONNECTED);
   }
 
-  // If not connected, launch portal
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!connected) {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Connect WiFi to:");
     lcd.setCursor(0, 1);
     lcd.print(nameForAP);
-    wm.startConfigPortal(nameForAP);
+    wm.setConfigPortalTimeout(180); 
+    connected = wm.startConfigPortal(nameForAP);
   }
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("WiFi Connected");
-  lcd.setCursor(0, 1);
-  lcd.print("Fetching data..");
-  const char* yearStr = seasonYearParam.getValue();
+  if (connected && WiFi.status() == WL_CONNECTED) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("WiFi Connected");
+    lcd.setCursor(0, 1);
+    lcd.print("Fetching data...");
 
-  fetchLocation();  // fetch and set time function inside
+    const char* yearStr = seasonYearParam.getValue();
 
-  if (yearStr != nullptr && strlen(yearStr) > 0) {
-    int year = atoi(yearStr);
-    if (year >= 1950 && year <= 2125) {
-      ChosenSeasonYear = year;
+    fetchLocation();
+
+    if (yearStr != nullptr && strlen(yearStr) > 0) {
+      int year = atoi(yearStr);
+      if (year >= 1950 && year <= 2125) {
+        ChosenSeasonYear = year;
+      }
     }
+
+  } else {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(" WIFI  NOT  SET ");
+    lcd.setCursor(0, 1);
+    lcd.print("RESET THE DEVICE");
+    Serial.println("Failed to connect to WiFi.");
+    delay(1000000); // effectively halts device
   }
 }
 
