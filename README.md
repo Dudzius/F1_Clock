@@ -73,14 +73,13 @@ To reset WiFi credentials, power off the device, then hold the button while powe
 
 Next, you’ll see the hotspot name you should connect to:
 ![connectToHotspot](https://github.com/user-attachments/assets/425a6b55-7521-404f-9b0b-c18d43e99fbc)
-![hotspot](https://github.com/user-attachments/assets/28489e19-5866-4257-ac72-37a82c592e58)
+
 
 Once connected, open the captive portal and select "Configure WiFi". Choose your network from the list and enter the password:
 
 (Optional) Enter an F1 season year. Used for past seasons data, if left empty it will be set to current year.
+<img width="1849" height="914" alt="configureWifi2" src="https://github.com/user-attachments/assets/424ada13-cd1f-4db9-b1e0-8fd45c4bef43" />
 
-![configureWifi](https://github.com/user-attachments/assets/96340732-29f2-4d1a-b11f-e790d9b04196)
-![configureWifiInputData](https://github.com/user-attachments/assets/aeb55632-43c8-4587-bde6-50cbdd141d50)
 
 If the connection is successful, the device will begin fetching data:
 ![fetchingData](https://github.com/user-attachments/assets/36b579f5-ea07-410a-9567-aa1b45754102)
