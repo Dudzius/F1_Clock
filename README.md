@@ -33,16 +33,25 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 - STAGE 4 - Drivers standings
 ![drivers](https://github.com/user-attachments/assets/22f30f33-da14-4ad4-8e7e-fe8f13d3240d)
 ![driversBody](https://github.com/user-attachments/assets/a8b86491-5943-4a12-b4ac-9ad88757cf02)
+![drivers1976](https://github.com/user-attachments/assets/488be357-8bf6-40a4-9384-32cc298d381f)
+![drivers2021](https://github.com/user-attachments/assets/38c55249-68c4-438b-92b5-89dbe9318674)
 
 - STAGE 5 - Calendar (upcoming race)
 ![race1](https://github.com/user-attachments/assets/61e7b43b-bfe8-43f1-a17e-d11af61ebb4e)
 ![race2](https://github.com/user-attachments/assets/d689b8a7-29e4-476e-86d2-608f569f54c6)
 
+If there is no upcoming race selected season:
+![raceInfErr](https://github.com/user-attachments/assets/2f45ad6b-a3e9-48be-8031-b1d85f299942)
+
+- Notification
+![notification](https://github.com/user-attachments/assets/78948388-9385-432b-a0d2-47bd3f99cfe7)
+
+
 
 ## Hardware:
 **Components Used:**
 - ESP32 DevKit V1
-- 16x4 I2C LCD Display
+- 16x2 I2C LCD Display
 - Buzzer
 - Push Button
 - Wires
@@ -55,9 +64,33 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 
 ## How it works
 
-### Setup
+### Setup -  Connecting to Wifi
+On boot, the ESP32 will attempt to connect using saved WiFi credentials. If none are found, it opens a captive portal where you can enter WiFi details and (optionally) a season year for F1 standings.
+![checkingWifi](https://github.com/user-attachments/assets/6e1ba82d-7747-44e1-8326-76fdbe75bfa6)
 
-On boot, the ESP32 attempts to connect to saved WiFi credentials. If none exist, it opens a captive portal for the user to enter WiFi details and (optionally) a season year for F1 standings. WiFi details are stored in flash memory.
+To reset WiFi credentials, power off the device, then hold the button while powering it back on. You’ll see this screen:
+![resettingWifi](https://github.com/user-attachments/assets/dcddecf8-6267-47cc-896c-ad9900742d86)
+
+Next, you’ll see the hotspot name you should connect to:
+![connectToHotspot](https://github.com/user-attachments/assets/425a6b55-7521-404f-9b0b-c18d43e99fbc)
+![hotspot](https://github.com/user-attachments/assets/28489e19-5866-4257-ac72-37a82c592e58)
+
+Once connected, open the captive portal and select "Configure WiFi". Choose your network from the list and enter the password:
+
+(Optional) Enter an F1 season year. Used for past seasons data, if left empty it will be set to current year.
+
+![configureWifi](https://github.com/user-attachments/assets/96340732-29f2-4d1a-b11f-e790d9b04196)
+![configureWifiInputData](https://github.com/user-attachments/assets/aeb55632-43c8-4587-bde6-50cbdd141d50)
+
+If the connection is successful, the device will begin fetching data:
+![fetchingData](https://github.com/user-attachments/assets/36b579f5-ea07-410a-9567-aa1b45754102)
+
+If the WiFi setup fails, you’ll see an error screen. Try setting up again:
+![WifiNotSet](https://github.com/user-attachments/assets/ff9424b1-b488-4f5b-b974-3594389e6c91)
+
+There also can be an error while trying to fetch data from APIs. User will be informed if there is such failure and recommended to reboot the device.
+![LocationNotSet](https://github.com/user-attachments/assets/229082b6-0f0b-4eed-8947-b00b3d96a050)
+
 
 ### Data Sources
 
@@ -79,14 +112,23 @@ Functions for fetching data are with retry logic and limit, for handling faiure 
 
 ### Runtime Behavior
 
-The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driver Standings, and Race Info. Stage switches automatically every 15 minutes or on button press.
+The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driver Standings, and Race Info. 
 
-- Weather is refreshed every hour
-- F1 data is refreshed 2 hours after a race completes
-- Notifications are triggered before race/quali sessions
-- LCD enters night mode (backlight off) between 23:00–06:00
+- Every 15 minutes (or on button press), the device enters a cycle that shows all stages one by one, then returns to the Clock.
 
-Short and long button presses are used for navigation and toggling night mode. No user interaction is required after setup.
+- Weather data is refreshed hourly.
+
+- F1 data is refreshed automatically ~2 hours after a race ends.
+
+- Notifications appear shortly before race or qualifying sessions.
+
+- The LCD enters night mode (backlight off) between 23:00–06:00.
+
+**Button controls:**
+
+- Short press: manually cycle through stages
+
+- Long press: temporarily toggle the backlight
 
 ## Credits
 
