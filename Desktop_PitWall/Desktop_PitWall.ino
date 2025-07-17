@@ -379,10 +379,12 @@ void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<
   filterStandingsArrayItem["wins"] = true;
 
   if (isConstructor) {
-    filterStandingsArrayItem.createNestedObject("Constructor")["name"] = true;
+    JsonObject constructorFilter = filterStandingsArrayItem.createNestedObject("Constructor");
+    constructorFilter["name"] = true;
   } else {
-    filterStandingsArrayItem.createNestedObject("Driver")["code"] = true;
-    filterStandingsArrayItem.createNestedObject("Driver")["driverId"] = true;
+    JsonObject driverFilter = filterStandingsArrayItem.createNestedObject("Driver");
+    driverFilter["code"] = true;
+    driverFilter["familyName"] = true;
   }
 
   JsonDocument doc;
@@ -411,13 +413,10 @@ void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<
     if (isConstructor) {
     line += String(standingData["Constructor"]["name"].as<const char*>());
   } else {
-    const char* code = standingData["Driver"]["code"] | nullptr;
-    const char* driverId = standingData["Driver"]["driverId"] | "???";
-
-    if (code && strlen(code) > 0) {
-      line += String(code);
+    if (standingData["Driver"].containsKey("code")) {
+      line += String(standingData["Driver"]["code"].as<const char*>());
     } else {
-      line += String(driverId);
+      line += sanitizeForLCD(String(standingData["Driver"]["familyName"].as<const char*>()));
     }
   }
 
@@ -1350,8 +1349,8 @@ void renderWeatherStage() {
   String header1 = "Now: ";
   String header2 = "+4h: ";
 
-  String scrollData1 = weatherSymbol + " " + currentCloud + "%  " + tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + currentPrecip + "%";
-  String scrollData2 = futureSymbol + " " + futureCloud + "%  " + tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + futurePrecip + "%";
+  String scrollData1 = tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + currentPrecip + "%  " + weatherSymbol + " " + currentCloud + "%";
+  String scrollData2 = tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + futurePrecip + "%  " + futureSymbol + " " + futureCloud + "%";
 
 
   String paddedScroll1 = "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1;
