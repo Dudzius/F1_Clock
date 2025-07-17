@@ -6,7 +6,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 
-#define BLUE_BUTTON 15
+#define BLUE_BUTTON 18
 #define BUZZER_PIN 4
 
 #define NOTE_A4 440
