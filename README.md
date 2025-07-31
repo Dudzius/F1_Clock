@@ -43,8 +43,8 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 ![race1](https://github.com/user-attachments/assets/61e7b43b-bfe8-43f1-a17e-d11af61ebb4e)
 ![race2](https://github.com/user-attachments/assets/d689b8a7-29e4-476e-86d2-608f569f54c6)
 
-If there is no upcoming race selected season:
-![raceInfErr](https://github.com/user-attachments/assets/2f45ad6b-a3e9-48be-8031-b1d85f299942)
+ If there is no upcoming race selected season:
+ ![raceInfErr](https://github.com/user-attachments/assets/2f45ad6b-a3e9-48be-8031-b1d85f299942)
 
 - Notification
 ![notification](https://github.com/user-attachments/assets/78948388-9385-432b-a0d2-47bd3f99cfe7)
@@ -131,6 +131,23 @@ The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driv
 - Short press: manually cycle through stages
 
 - Long press: temporarily toggle the backlight
+
+## Power and Network Usage
+
+**Power Consumption**
+
+Based on testing with a 12,000 mAh power bank at 5 V, device operated continuously for 115 hours, consuming about 0.52 watts on average. 
+ `
+12,000 mAh × 5 V ÷ 1000 = 60 Wh  
+60 Wh ÷ 115 h = 0.52 W
+ `
+
+ This means it would take over 1,917 hours (80 days) to consume just 1 kilowatt-hour of electricity.
+
+ **Data Usage**
+ 
+The device downloads less than 100 kb of data for a full update, making its data usage insignificant to your network.
+
 
 ## Credits
 
