@@ -43,8 +43,8 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 ![race1](https://github.com/user-attachments/assets/61e7b43b-bfe8-43f1-a17e-d11af61ebb4e)
 ![race2](https://github.com/user-attachments/assets/d689b8a7-29e4-476e-86d2-608f569f54c6)
 
-If there is no upcoming race selected season:
-![raceInfErr](https://github.com/user-attachments/assets/2f45ad6b-a3e9-48be-8031-b1d85f299942)
+ If there is no upcoming race selected season:
+ ![raceInfErr](https://github.com/user-attachments/assets/2f45ad6b-a3e9-48be-8031-b1d85f299942)
 
 - Notification
 ![notification](https://github.com/user-attachments/assets/78948388-9385-432b-a0d2-47bd3f99cfe7)
@@ -66,6 +66,24 @@ If there is no upcoming race selected season:
 
 
 ## How it works
+
+### Data Sources
+
+The device fetches data from the following public APIs:
+
+- **F1 data** from [jolpi.ca/ergast](https://api.jolpi.ca/ergast/)
+  - Race schedule, qualifying times, constructor & driver standings
+
+- **IP Geolocation** from [ip-api.com](https://ip-api.com/)
+  - Used to determine latitude/longitude and IP for timezone lookup
+
+- **Timezone info** from [worldtimeapi.org](http://worldtimeapi.org/)
+  - Raw and DST offsets based on IP, used for setting system time
+
+- **Weather data** from [open-meteo.com](https://open-meteo.com/en/docs)
+  - Hourly temperature, cloud coverage, and precipitation probability
+
+Functions for fetching data are with retry logic and limit, for handling faiure on API calls.
 
 ### Setup -  Connecting to Wifi
 On boot, the ESP32 will attempt to connect using saved WiFi credentials. If none are found, it opens a captive portal where you can enter WiFi details and (optionally) a season year for F1 standings.
@@ -94,23 +112,13 @@ There also can be an error while trying to fetch data from APIs. User will be in
 ![LocationNotSet](https://github.com/user-attachments/assets/229082b6-0f0b-4eed-8947-b00b3d96a050)
 
 
-### Data Sources
+### Adjusting Screen Contrast
 
-The device fetches data from the following public APIs:
+If the characters on the screen are not clearly visible, you can easily adjust the display contrast using the contrast screw on the back of the screen module.
 
-- **F1 data** from [jolpi.ca/ergast](https://api.jolpi.ca/ergast/)
-  - Race schedule, qualifying times, constructor & driver standings
+![contrast](https://github.com/user-attachments/assets/3e134ffc-0c84-43ae-b740-3025b8ceeb37)
 
-- **IP Geolocation** from [ip-api.com](https://ip-api.com/)
-  - Used to determine latitude/longitude and IP for timezone lookup
-
-- **Timezone info** from [worldtimeapi.org](http://worldtimeapi.org/)
-  - Raw and DST offsets based on IP, used for setting system time
-
-- **Weather data** from [open-meteo.com](https://open-meteo.com/en/docs)
-  - Hourly temperature, cloud coverage, and precipitation probability
-
-Functions for fetching data are with retry logic and limit, for handling faiure on API calls.
+Adjust slowly until the text is clear and comfortable to read.
 
 ### Runtime Behavior
 
@@ -131,6 +139,23 @@ The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driv
 - Short press: manually cycle through stages
 
 - Long press: temporarily toggle the backlight
+
+## Power and Network Usage
+
+**Power Consumption**
+
+Based on testing with a 12,000 mAh power bank at 5 V, device operated continuously for 115 hours, consuming about 0.52 watts on average. 
+ `
+12,000 mAh × 5 V ÷ 1000 = 60 Wh  
+60 Wh ÷ 115 h = 0.52 W
+ `
+
+ This means it would take over 1,917 hours (80 days) to consume just 1 kilowatt-hour of electricity.
+
+ **Data Usage**
+ 
+The device downloads less than 100 kb of data for a full update, making its data usage insignificant to your network.
+
 
 ## Credits
 
