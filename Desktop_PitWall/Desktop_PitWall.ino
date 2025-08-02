@@ -341,6 +341,7 @@ void fetchUpcomingRace(const String& url) {
 
       raceStart = parseUtcToLocal(date, time);
       qualiStart = parseUtcToLocal(qualDate, qualTime);
+
       return;
     }
   }
@@ -914,6 +915,11 @@ void autoAdvanceStage() {
   const time_t fiveMinutes = 5 * 60;
   const time_t oneHour = 60 * 60;
 
+  // for switching stages from clock every 15 min
+  if (millis() - lastStageChange > stageInterval && displayStage == STAGE_CLOCK) {
+    advanceStage();
+  }
+
   // --- Notification triggers ---
   if (!raceNotified && raceStart - now <= fiveMinutes && raceStart - now > 0) {
     displayStage = STAGE_NOTIFICATION;
@@ -929,23 +935,20 @@ void autoAdvanceStage() {
     return;
   }
 
-  if (!predictionNotified && qualiStart - now <= oneHour && qualiStart - now > 55 * 60) {
+  if (!predictionNotified && qualiStart - now <= oneHour && qualiStart - now > 0) {
     displayStage = STAGE_NOTIFICATION;
     notificationMsg = "Make Predictions";
     predictionNotified = true;
     return;
   }
 
-  if (now - raceStart > 60) {
+  if (now - raceStart > fiveMinutes) {
     raceNotified = false;
     qualiNotified = false;
     predictionNotified = false;
   }
 
-  // for switching stages from clock every 15 min
-  if (millis() - lastStageChange > stageInterval && displayStage == STAGE_CLOCK) {
-    advanceStage();
-  }
+
 }
 
 // for moving to the next stage
