@@ -67,6 +67,24 @@ A desktop gadget powered by ESP32 that shows live F1 standings, race countdown, 
 
 ## How it works
 
+### Data Sources
+
+The device fetches data from the following public APIs:
+
+- **F1 data** from [jolpi.ca/ergast](https://api.jolpi.ca/ergast/)
+  - Race schedule, qualifying times, constructor & driver standings
+
+- **IP Geolocation** from [ip-api.com](https://ip-api.com/)
+  - Used to determine latitude/longitude and IP for timezone lookup
+
+- **Timezone info** from [worldtimeapi.org](http://worldtimeapi.org/)
+  - Raw and DST offsets based on IP, used for setting system time
+
+- **Weather data** from [open-meteo.com](https://open-meteo.com/en/docs)
+  - Hourly temperature, cloud coverage, and precipitation probability
+
+Functions for fetching data are with retry logic and limit, for handling faiure on API calls.
+
 ### Setup -  Connecting to Wifi
 On boot, the ESP32 will attempt to connect using saved WiFi credentials. If none are found, it opens a captive portal where you can enter WiFi details and (optionally) a season year for F1 standings.
 ![checkingWifi](https://github.com/user-attachments/assets/6e1ba82d-7747-44e1-8326-76fdbe75bfa6)
@@ -94,23 +112,13 @@ There also can be an error while trying to fetch data from APIs. User will be in
 ![LocationNotSet](https://github.com/user-attachments/assets/229082b6-0f0b-4eed-8947-b00b3d96a050)
 
 
-### Data Sources
+### Adjusting Screen Contrast
 
-The device fetches data from the following public APIs:
+If the characters on the screen are not clearly visible, you can easily adjust the display contrast using the contrast screw on the back of the screen module.
 
-- **F1 data** from [jolpi.ca/ergast](https://api.jolpi.ca/ergast/)
-  - Race schedule, qualifying times, constructor & driver standings
+![contrast](https://github.com/user-attachments/assets/3e134ffc-0c84-43ae-b740-3025b8ceeb37)
 
-- **IP Geolocation** from [ip-api.com](https://ip-api.com/)
-  - Used to determine latitude/longitude and IP for timezone lookup
-
-- **Timezone info** from [worldtimeapi.org](http://worldtimeapi.org/)
-  - Raw and DST offsets based on IP, used for setting system time
-
-- **Weather data** from [open-meteo.com](https://open-meteo.com/en/docs)
-  - Hourly temperature, cloud coverage, and precipitation probability
-
-Functions for fetching data are with retry logic and limit, for handling faiure on API calls.
+Adjust slowly until the text is clear and comfortable to read.
 
 ### Runtime Behavior
 
