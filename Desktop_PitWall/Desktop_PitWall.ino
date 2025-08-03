@@ -242,6 +242,17 @@ bool waitingForNextData = false;
 time_t nextDataCheckTime = 0;
 time_t nextWeatherCheckTime = 0;
 
+struct Notification {
+    String message;
+    time_t triggerTime;
+    bool triggered;
+};
+
+const int MAX_NOTIFICATIONS = 3;
+Notification notificationQueue[MAX_NOTIFICATIONS];
+int notificationCount = 0;
+int currentNotificationIndex = -1; 
+
 bool isNightMode = false;
 bool shouldBeNight = false;
 
@@ -561,8 +572,6 @@ void fetchCurrentWeather() {
   futurePrecip = precipArray[currentHour + 4];
 
   #if DEBUG_MODE
-    Serial.println(url);
-    Serial.println(currentHour);
     Serial.println("Weather data fetched:");
     Serial.print("Now: ");
     Serial.print(currentTemp); Serial.print("°C, ");
@@ -624,16 +633,23 @@ void refreshAllData() {
 
   fetchUpcomingRace(raceURL);
 
+  scheduleRaceNotifications();
+
   waitingForNextData = false;
   if (upcomingRound > 0) {
-    nextDataCheckTime = raceStart + 4 * 60 * 60;
+    nextDataCheckTime = raceStart + 3 * 60 * 60;
     waitingForNextData = true;
 
-  #if DEBUG_MODE
+    #if DEBUG_MODE
+      Serial.print("Quali start at: ");
+      Serial.println(ctime(&qualiStart));
+      Serial.print("Race start at: ");
+      Serial.println(ctime(&raceStart));
       Serial.print("First standings check scheduled at: ");
       Serial.println(ctime(&nextDataCheckTime));
-  #endif
+    #endif
   }
+
 }
 
 // for checking if there is newer data
@@ -646,7 +662,7 @@ void checkForNewDataIfTime() {
     if (fetchedRound > currentRound) {
       refreshAllData();
     } else {
-      nextDataCheckTime = now + 60 * 60;  // Check again in 1 hour
+      nextDataCheckTime = now + 30 * 60;
     }
   }
 
@@ -657,6 +673,38 @@ void checkForNewDataIfTime() {
   }
 }
 
+// for scheduling each notification
+void scheduleRaceNotifications() {
+    notificationCount = 0; // reset queue
+
+    // --- 1-hour before quali ---
+    notificationQueue[notificationCount].message = "Make Predictions";
+    notificationQueue[notificationCount].triggerTime = qualiStart - 60*60;
+    notificationQueue[notificationCount].triggered = false;
+    notificationCount++;
+
+    // --- 5-min before quali ---
+    notificationQueue[notificationCount].message = " Quali in 5 min ";
+    notificationQueue[notificationCount].triggerTime = qualiStart - 5*60;
+    notificationQueue[notificationCount].triggered = false;
+    notificationCount++;
+
+    // --- 5-min before race ---
+    notificationQueue[notificationCount].message = " Race in 5 min! ";
+    notificationQueue[notificationCount].triggerTime = raceStart - 5*60;
+    notificationQueue[notificationCount].triggered = false;
+    notificationCount++;
+
+#if DEBUG_MODE
+    Serial.println("Notifications scheduled:");
+    for (int i = 0; i < notificationCount; i++) {
+        Serial.print(" - ");
+        Serial.print(notificationQueue[i].message);
+        Serial.print(" at ");
+        Serial.println(ctime(&notificationQueue[i].triggerTime));
+    }
+#endif
+}
 /*----------- Data fetching   -----------*/
 /*#######################################*/
 
@@ -901,6 +949,33 @@ void handleButtonPress() {
     }
   }
 }
+
+// for checking on scheduled notifications
+void checkNotifications() {
+    time_t now = time(nullptr);
+
+    // If a notification is already active, don't trigger a new one until it's done
+    if (currentNotificationIndex != -1) return;
+
+    for (int i = 0; i < notificationCount; i++) {
+        Notification &n = notificationQueue[i];
+
+        if (!n.triggered && now >= n.triggerTime && now < n.triggerTime + 5*60) {
+            currentNotificationIndex = i;
+            displayStage = STAGE_NOTIFICATION;
+            notificationMsg = n.message;
+            n.triggered = true;
+            #if DEBUG_MODE
+                Serial.print("Triggered notification: ");
+                Serial.println(n.message);
+            #endif
+
+            return;
+        }
+    }
+}
+
+
 /*----------- Helper functions-----------*/
 /*#######################################*/
 
@@ -912,43 +987,11 @@ void handleButtonPress() {
 void autoAdvanceStage() {
   const unsigned long stageInterval = 15UL * 60UL * 1000UL;
   time_t now = time(NULL);
-  const time_t fiveMinutes = 5 * 60;
-  const time_t oneHour = 60 * 60;
 
   // for switching stages from clock every 15 min
   if (millis() - lastStageChange > stageInterval && displayStage == STAGE_CLOCK) {
     advanceStage();
   }
-
-  // --- Notification triggers ---
-  if (!raceNotified && raceStart - now <= fiveMinutes && raceStart - now > 0) {
-    displayStage = STAGE_NOTIFICATION;
-    notificationMsg = " Race in 5 min! ";
-    raceNotified = true;
-    return;
-  }
-
-  if (!qualiNotified && qualiStart - now <= fiveMinutes && qualiStart - now > 0) {
-    displayStage = STAGE_NOTIFICATION;
-    notificationMsg = " Quali in 5 min ";
-    qualiNotified = true;
-    return;
-  }
-
-  if (!predictionNotified && qualiStart - now <= oneHour && qualiStart - now > 0) {
-    displayStage = STAGE_NOTIFICATION;
-    notificationMsg = "Make Predictions";
-    predictionNotified = true;
-    return;
-  }
-
-  if (now - raceStart > fiveMinutes) {
-    raceNotified = false;
-    qualiNotified = false;
-    predictionNotified = false;
-  }
-
-
 }
 
 // for moving to the next stage
@@ -996,8 +1039,7 @@ void resetStageState() {
   lastBlinkTime = 0;
   textVisible = true;
   notificationScroll.scrollIndex = 0;
-  notificationScroll.startTime = millis();
-  notificationScroll.lastScroll = millis();
+  notificationScroll.startTime = 0;
   lcd.clear();
 }
 
@@ -1260,8 +1302,6 @@ void renderCalendarStage() {
 
 // for dispalying notifiaction stage
 void renderNotificationStage() {
-
-
   const unsigned long duration = 15000;
   const unsigned long blinkInterval = 500;
 
@@ -1289,6 +1329,7 @@ void renderNotificationStage() {
   if (now - notificationScroll.startTime > duration) {
     notificationScroll.startTime = 0;
     notificationMsg = "";
+    currentNotificationIndex = -1;
     advanceStage();
     return;
   }
@@ -1431,7 +1472,7 @@ void setup() {
 void loop() {
   handleButtonPress();
   autoAdvanceStage();
-  renderCurrentStage();
-
+  checkNotifications();
   checkForNewDataIfTime();
+  renderCurrentStage();
 }
