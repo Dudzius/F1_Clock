@@ -253,8 +253,12 @@ Notification notificationQueue[MAX_NOTIFICATIONS];
 int notificationCount = 0;
 int currentNotificationIndex = -1; 
 
-bool isNightMode = false;
-bool shouldBeNight = false;
+enum NightModeState { NIGHTMODE_OFF, NIGHTMODE_AUTO, NIGHTMODE_FORCED };
+NightModeState nightModeState = NIGHTMODE_OFF;
+const int NIGHT_START_HOUR = 23;
+const int NIGHT_END_HOUR = 6;
+bool backlightIsOn = true;
+bool isNight = false;
 
 float currentTemp = 0;
 int currentCloud = 0;
@@ -695,7 +699,7 @@ void scheduleRaceNotifications() {
     notificationQueue[notificationCount].triggered = false;
     notificationCount++;
 
-#if DEBUG_MODE
+  #if DEBUG_MODE  
     Serial.println("Notifications scheduled:");
     for (int i = 0; i < notificationCount; i++) {
         Serial.print(" - ");
@@ -703,7 +707,7 @@ void scheduleRaceNotifications() {
         Serial.print(" at ");
         Serial.println(ctime(&notificationQueue[i].triggerTime));
     }
-#endif
+  #endif
 }
 /*----------- Data fetching   -----------*/
 /*#######################################*/
@@ -759,22 +763,49 @@ time_t parseUtcToLocal(const char* dateStr, const char* timeStr) {
   return utcTime + utcOffsetSeconds;
 }
 
-// for cheching for night mode
-void checkTimeBasedNightMode() {
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)) {
-    int hour = timeinfo.tm_hour;
-
-    shouldBeNight = (hour >= 23 || hour < 6);
-
-    if (shouldBeNight && !isNightMode) {
-      lcd.noBacklight();
-      isNightMode = true;
-    } else if (!shouldBeNight && isNightMode) {
-      lcd.backlight();
-      isNightMode = false;
+// for switching backlight
+void setBacklight(bool on) {
+    if (on && !backlightIsOn) {
+        lcd.backlight();
+        backlightIsOn = true;
+    } else if (!on && backlightIsOn) {
+        lcd.noBacklight();
+        backlightIsOn = false;
     }
+}
+
+// Checks time and updates auto/forced night mode
+void checkNightMode() {
+  static int lastHour = -1;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) return;
+
+  int hour = timeinfo.tm_hour;
+  isNight = (hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR);
+  bool shouldDim = false;
+
+  switch (nightModeState) {
+    case NIGHTMODE_AUTO:
+      shouldDim = isNight;
+    break;
+
+    case NIGHTMODE_FORCED:
+      shouldDim = true;
+      if (hour == NIGHT_END_HOUR && hour != lastHour) {
+        nightModeState = NIGHTMODE_AUTO;
+      }
+    break;
+
+    case NIGHTMODE_OFF:
+      shouldDim = false;
+      if (hour == NIGHT_START_HOUR && hour != lastHour) {
+        nightModeState = NIGHTMODE_AUTO;
+      }
+    break;
   }
+
+  lastHour = hour;
+  setBacklight(!shouldDim);
 }
 
 // for constructing a custom car symbol
@@ -932,13 +963,13 @@ void handleButtonPress() {
         buttonWasPressed = true;
         buttonHeld = false;
       } else if (!buttonHeld && millis() - buttonDownTime >= longPressTime) {
-        isNightMode = !isNightMode;
-        if (isNightMode) {
-          lcd.noBacklight();
+        if (nightModeState == NIGHTMODE_FORCED) {
+          nightModeState = NIGHTMODE_OFF;
         } else {
-          lcd.backlight();
+          nightModeState = NIGHTMODE_FORCED;
         }
         buttonHeld = true;
+        checkNightMode();
       }
     } else {
       if (buttonWasPressed && !buttonHeld) {
@@ -1079,18 +1110,19 @@ void renderClockStage() {
       String timeStr = String(timeBuf);
 
       if (dateStr != lastDateStr) {
-        checkTimeBasedNightMode();
+
         lastDateStr = dateStr;
         lcd.setCursor(0, 0);
         int datePadding = (16 - dateStr.length()) / 2;
         lcd.setCursor(datePadding, 0);
         lcd.print(dateStr);
       }
+
       lcd.setCursor(0, 1);
       int timePadding = (16 - timeStr.length()) / 2;
       lcd.setCursor(timePadding, 1);
       lcd.print(timeStr);
-
+      checkNightMode();
     } else {
       lcd.setCursor(0, 0);
       lcd.print(" Time not set   ");
@@ -1378,8 +1410,8 @@ void renderWeatherStage() {
       }
     };
 
-    setCloudIcons(4, currentCloud, shouldBeNight);
-    setCloudIcons(6, futureCloud, shouldBeNight);
+    setCloudIcons(4, currentCloud, isNight);
+    setCloudIcons(6, futureCloud, isNight);
 
     iconsInitialized = true;
   }
