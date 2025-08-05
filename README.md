@@ -152,6 +152,13 @@ Based on testing with a 12,000 mAh power bank at 5 V, device operated contin
 
  This means it would take over 1,917 hours (80 days) to consume just 1 kilowatt-hour of electricity.
 
+ **Powering the Device**
+
+ The device can be powered in two simple ways:
+
+ - Via a 5V USB port – Practically any USB port (on a computer or power bank) can provide the required 5V.
+ - Via a standard USB charging adapter – For example, a common phone charger will work perfectly.
+
  **Data Usage**
  
 The device downloads less than 100 kb of data for a full update, making its data usage insignificant to your network.
