@@ -136,9 +136,9 @@ The display cycles through 5 stages: Clock, Weather, Constructor Standings, Driv
 
 **Button controls:**
 
-- Short press: manually cycle through stages
+- Short press: manually cycle through stages.
 
-- Long press: temporarily toggle the backlight
+- Long press: toggle the backlight manually (the backlight automatically switches between day/night modes at the start and end of the night, resetting manual toggles).
 
 ## Power and Network Usage
 
