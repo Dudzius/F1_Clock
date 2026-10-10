@@ -1,1406 +1,1179 @@
-#include <WiFiManager.h>        // https://github.com/tzapu/WiFiManager
-#include <ArduinoJson.h>        // https://github.com/bblanchon/ArduinoJson
-#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C 
-#include <HTTPClient.h>
-#include <time.h>
-#include <Wire.h>
-#include <WiFi.h>
+/*
+ ==============================================================================
+  F1 PITWALL - ESP32 + 16x2 I2C LCD desk display
+ ==============================================================================
+  Shows: clock, weather, F1 constructors / drivers standings, next race,
+  and a buzzer alert before qualifying and the race.
 
+  REQUIRED LIBRARIES (install through the Arduino Library Manager)
+    - WiFiManager        by tzapu            (WiFi setup portal)
+    - ArduinoJson        by Benoit Blanchon  (version 7.x)
+    - LiquidCrystal_I2C  by Frank de Brabander / johnrickman (any common fork)
+    - ESP32 board package by Espressif
+
+  HARDWARE
+    - ESP32 dev board
+    - 16x2 LCD with I2C backpack (address 0x27 or 0x3F, see LCD_ADDRESS)
+    - 1 push button  : GPIO 18 to GND (internal pull-up is used)
+    - 1 passive buzzer: GPIO 4
+
+  FIRST START / CHANGING WIFI
+    - On first start the display shows "Connect WiFi to: F1_PITWALL".
+      Join that WiFi network with your phone and enter your home WiFi.
+    - To change WiFi later: hold the button while powering the device on.
+
+  BUTTON
+    - Short press : next screen
+    - Long press  : (2 s) flip the night backlight state until the next
+                    scheduled change (22:00 or 06:00 by default)
+
+  HOW TIME WORKS (important)
+    The old version asked internet APIs for the time zone and often failed.
+    Now the ESP32 gets the time from NTP servers and works out summer/winter
+    time ITSELF using the rule in TIMEZONE below. No API needed, it switches
+    automatically and never needs a restart.
+
+  SETTING UP FOR ANOTHER CITY (3 things to change in USER SETTINGS):
+    1. TIMEZONE   - copy a line from the table below
+    2. LATITUDE / LONGITUDE - your city (used for weather only)
+    3. NIGHT_START_HOUR / NIGHT_END_HOUR if you want other dim hours
+ ==============================================================================
+*/
+
+#include <WiFiManager.h>  // https://github.com/tzapu/WiFiManager
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>        // https://github.com/bblanchon/ArduinoJson (v7)
+#include <LiquidCrystal_I2C.h>  // https://github.com/johnrickman/LiquidCrystal_I2C
+#include <Wire.h>
+#include <time.h>
+#include <vector>
+
+/*#######################################*/
+/*------------ USER SETTINGS ------------*/
+
+// ---- Time zone (POSIX rule, handles summer/winter time automatically) ----
+// Vilnius / Lithuania / Eastern Europe (UTC+2, DST last Sun Mar -> last Sun Oct):
+const char* const TIMEZONE = "EET-2EEST,M3.5.0/3,M10.5.0/4";
+//
+// Other places - replace the line above with one of these:
+//   Central Europe (Berlin, Paris, Rome, Warsaw): "CET-1CEST,M3.5.0,M10.5.0/3"
+//   UK / Ireland:                                 "GMT0BST,M3.5.0/1,M10.5.0"
+//   Portugal:                                     "WET0WEST,M3.5.0/1,M10.5.0"
+//   US Eastern (New York):                        "EST5EDT,M3.2.0,M11.1.0"
+//   US Central (Chicago):                         "CST6CDT,M3.2.0,M11.1.0"
+//   US Pacific (Los Angeles):                     "PST8PDT,M3.2.0,M11.1.0"
+//   India:                                        "IST-5:30"
+//   Japan:                                        "JST-9"
+//   Sydney:                                       "AEST-10AEDT,M10.1.0,M4.1.0/3"
+//   No daylight saving, plain UTC:                "UTC0"
+// (Note the sign: in these rules places EAST of Greenwich are NEGATIVE.)
+// More zones: https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
+
+// ---- Location for the weather forecast (Vilnius) ----
+// The weather service finds the local time zone from these coordinates by itself.
+const float LATITUDE = 54.6872f;
+const float LONGITUDE = 25.2797f;
+
+// ---- F1 season: "current" or a year such as "2021" ----
+const char* const F1_SEASON = "current";
+
+// ---- Night mode: backlight off from NIGHT_START_HOUR until NIGHT_END_HOUR ----
+// (start must be later in the day than end, e.g. 22 and 6)
+const int NIGHT_START_HOUR = 22;
+const int NIGHT_END_HOUR = 6;
+
+// ---- Weekly restart (only used if the internet has been gone for a long time)
+// 1 = Monday ... 6 = Saturday, 0 = Sunday. Restarts at most once a week.
+const int RESTART_WEEKDAY = 1;
+const int RESTART_HOUR = 4;
+
+// ---- Hardware ----
 #define BLUE_BUTTON 18
 #define BUZZER_PIN 4
+#define LCD_ADDRESS 0x27  // try 0x3F if the screen stays blank
+
+// ---- Set to 1 to see debug messages in the Serial Monitor (115200) ----
+#define DEBUG_MODE 0
+
+/*------------ USER SETTINGS ------------*/
+/*#######################################*/
+
+// ---- Other constants (normally no need to change) ----
+const char* const NTP_SERVER_1 = "pool.ntp.org";
+const char* const NTP_SERVER_2 = "time.nist.gov";
+const char* const NTP_SERVER_3 = "lt.pool.ntp.org";  // any regional pool is fine
+const time_t MIN_VALID_TIME = 1700000000;            // anything earlier = clock not synced yet
+const char* const nameForAP = "F1_PITWALL";          // WiFi setup hotspot name
+
+const unsigned long STAGE_INTERVAL_MS = 15UL * 60UL * 1000UL;  // clock -> weather every 15 min
+const unsigned long CLOCK_INTERLUDE_MS = 3000;                 // clock shown between screens
+const unsigned long HTTP_TIMEOUT_MS = 6000;
+const unsigned long OFFLINE_WARNING_MS = 2UL * 60UL * 60UL * 1000UL;   // "!" on clock after 2 h without data
+const unsigned long RESTART_OFFLINE_MS = 6UL * 60UL * 60UL * 1000UL;   // restart is allowed after 6 h without data
+
+#if DEBUG_MODE
+#define DBG(x) Serial.println(x)
+#else
+#define DBG(x)
+#endif
 
 #define NOTE_A4 440
 #define NOTE_B4 494
 #define REST 0
 
-#define DEBUG_MODE 0  // Set to 0 to disable all Serial prints for debugging
+LiquidCrystal_I2C lcd(LCD_ADDRESS, 16, 2);
 
-LiquidCrystal_I2C lcd(0x27, 16, 2);
-
-// for notification alert
-const int v2melody[] = {
-  REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_B4
-};
-const int v2durations[] = {
- 4,4,4,4,4,4,4,4,4,2
-};
+// notification alert melody
+const int v2melody[] = { REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_A4, REST, NOTE_B4 };
+const int v2durations[] = { 4, 4, 4, 4, 4, 4, 4, 4, 4, 2 };
 
 // custom characters
-uint8_t formula1_1[8] = {
-  0b00110,
-  0b01100,
-  0b01100,
-  0b11111,
-  0b11111,
-  0b01100,
-  0b01100,
-  0b00110,
-};
-uint8_t formula1_2[8] = {
-  0b11100,
-  0b11101,
-  0b01011,
-  0b11111,
-  0b11111,
-  0b01011,
-  0b11101,
-  0b11100,
-};
-uint8_t formula1_3[8] = {
-  0b00000,
-  0b11110,
-  0b11111,
-  0b11111,
-  0b11111,
-  0b11111,
-  0b11110,
-  0b00000,
-};
-uint8_t formula1_4[8] = {
-  0b11100,
-  0b11101,
-  0b01011,
-  0b11101,
-  0b11101,
-  0b01011,
-  0b11101,
-  0b11100,
-};
-uint8_t temperatureIcon[8] = {
-  0b00100,
-  0b01010,
-  0b01010,
-  0b01010,
-  0b01110,
-  0b11111,
-  0b11111,
-  0b01110,
-};
-uint8_t rainIcon[8] = {
-  0b00100,
-  0b00100,
-  0b01010,
-  0b01010,
-  0b10001,
-  0b10001,
-  0b10001,
-  0b01110,
-};
-uint8_t celsiusIcon[8] = {
-  0b11000,
-  0b11000,
-  0b00000,
-  0b00111,
-  0b00100,
-  0b00100,
-  0b00111,
-  0b00000,
-};
-uint8_t SunIcon_1[8] = {
-  0b10000,
-  0b01001,
-  0b00011,
-  0b10110,
-  0b00110,
-  0b00011,
-  0b01001,
-  0b10000,
-};
-uint8_t SunIcon_2[8] = {
-  0b00001,
-  0b10010,
-  0b11000,
-  0b01101,
-  0b01100,
-  0b11000,
-  0b10010,
-  0b00001,
-};
-uint8_t moonIcon_1[8] = {
-  0b00000,
-  0b10001,
-  0b00011,
-  0b00110,
-  0b00110,
-  0b00011,
-  0b00001,
-  0b01000,
-};
-uint8_t moonIcon_2[8] = {
-  0b00000,
-  0b10000,
-  0b01000,
-  0b00001,
-  0b00000,
-  0b01000,
-  0b10000,
-  0b00000,
-};
-uint8_t cloudIcon_1[8] = {
-  0b00000,
-  0b00000,
-  0b00000,
-  0b01110,
-  0b10001,
-  0b10000,
-  0b01111,
-  0b00000,
-};
-uint8_t cloudIcon_2[8] = {
-  0b00000,
-  0b01110,
-  0b10001,
-  0b10001,
-  0b11001,
-  0b00001,
-  0b11110,
-  0b00000,
-};
-uint8_t cloudIconFill_1[8] = {
-  0b00000,
-  0b00000,
-  0b00000,
-  0b01110,
-  0b11111,
-  0b11111,
-  0b01111,
-  0b00000,
-};
-uint8_t cloudIconFill_2[8] = {
-  0b00000,
-  0b01110,
-  0b11111,
-  0b11111,
-  0b01111,
-  0b11111,
-  0b11110,
-  0b00000,
-};
+uint8_t formula1_1[8] = { 0b00110, 0b01100, 0b01100, 0b11111, 0b11111, 0b01100, 0b01100, 0b00110 };
+uint8_t formula1_2[8] = { 0b11100, 0b11101, 0b01011, 0b11111, 0b11111, 0b01011, 0b11101, 0b11100 };
+uint8_t formula1_3[8] = { 0b00000, 0b11110, 0b11111, 0b11111, 0b11111, 0b11111, 0b11110, 0b00000 };
+uint8_t formula1_4[8] = { 0b11100, 0b11101, 0b01011, 0b11101, 0b11101, 0b01011, 0b11101, 0b11100 };
+uint8_t temperatureIcon[8] = { 0b00100, 0b01010, 0b01010, 0b01010, 0b01110, 0b11111, 0b11111, 0b01110 };
+uint8_t rainIcon[8] = { 0b00100, 0b00100, 0b01010, 0b01010, 0b10001, 0b10001, 0b10001, 0b01110 };
+uint8_t celsiusIcon[8] = { 0b11000, 0b11000, 0b00000, 0b00111, 0b00100, 0b00100, 0b00111, 0b00000 };
+uint8_t SunIcon_1[8] = { 0b10000, 0b01001, 0b00011, 0b10110, 0b00110, 0b00011, 0b01001, 0b10000 };
+uint8_t SunIcon_2[8] = { 0b00001, 0b10010, 0b11000, 0b01101, 0b01100, 0b11000, 0b10010, 0b00001 };
+uint8_t moonIcon_1[8] = { 0b00000, 0b10001, 0b00011, 0b00110, 0b00110, 0b00011, 0b00001, 0b01000 };
+uint8_t moonIcon_2[8] = { 0b00000, 0b10000, 0b01000, 0b00001, 0b00000, 0b01000, 0b10000, 0b00000 };
+uint8_t cloudIcon_1[8] = { 0b00000, 0b00000, 0b00000, 0b01110, 0b10001, 0b10000, 0b01111, 0b00000 };
+uint8_t cloudIcon_2[8] = { 0b00000, 0b01110, 0b10001, 0b10001, 0b11001, 0b00001, 0b11110, 0b00000 };
+uint8_t cloudIconFill_1[8] = { 0b00000, 0b00000, 0b00000, 0b01110, 0b11111, 0b11111, 0b01111, 0b00000 };
+uint8_t cloudIconFill_2[8] = { 0b00000, 0b01110, 0b11111, 0b11111, 0b01111, 0b11111, 0b11110, 0b00000 };
 
-const char* nameForAP = "F1_PITWALL";  // hotspot name
+/*#######################################*/
+/*----------------- State ---------------*/
 
-// display stages for different data
-enum DisplayStage { STAGE_CONSTRUCTORS,
+// screens
+enum DisplayStage { STAGE_CLOCK,
+                    STAGE_WEATHER,
+                    STAGE_CONSTRUCTORS,
                     STAGE_DRIVERS,
                     STAGE_CALENDAR,
-                    STAGE_CLOCK,
-                    STAGE_NOTIFICATION,
-                    STAGE_WEATHER };
-static DisplayStage displayStage = STAGE_CLOCK;
-
-enum BuzzerState { BUZZER_IDLE,
-                   BUZZER_PLAYING_NOTE,
-                   BUZZER_RESTING };
-BuzzerState buzzerState = BUZZER_IDLE;
-bool raceNotified = false;
-bool qualiNotified = false;
-bool predictionNotified = false;
-String notificationMsg = "";
-int noConnection = 0;
-
+                    STAGE_NOTIFICATION };
+DisplayStage displayStage = STAGE_CLOCK;
+DisplayStage pendingStage = STAGE_CLOCK;  // screen waiting behind the 3 s clock
+bool hasPending = false;
+unsigned long interludeUntil = 0;
 unsigned long lastStageChange = 0;
-
-// variables for data
-int ChosenSeasonYear = 0;
-int seasonYear = 0;
-int currentRound = 0;
-int upcomingRound = 0;
-int totalRounds = 0;
-String raceErrorMsg;
-String raceName;
-time_t raceStart, qualiStart;
-std::vector<String> bodyLines;
-std::vector<String> constructorLines;
-std::vector<String> driverLines;
+bool stageInitialized = false;  // each screen draws its static parts once per visit
 
 struct ScrollState {
   int scrollIndex = 0;
   int scrollSpeed = 375;
-  int state = 0;
   unsigned long lastScroll = 0;
-  unsigned long startTime = 0;
+  unsigned long headerUntil = 0;
 };
-ScrollState constructorScroll, driverScroll, calendarScroll, weatherScroll, buzzerPlay, notificationScroll;
-bool iconsInitialized = false;
-bool calendarFirstEntry = true;
-bool calendarScrolling = false;
-bool calendarDoneScrolling = false;
+ScrollState constructorScroll, driverScroll, weatherScroll, notificationScroll;
 
-// variables for time and date
-const char* ntpServer1 = "pool.ntp.org";
-const char* ntpServer2 = "time.nist.gov";
-long utcOffsetSeconds = 0;
-String ipAddress;
-float latitude = 0.0;
-float longitude = 0.0;
+// clock screen
 String lastDateStr = "";
+unsigned long clockLastUpdate = 0;
 
-unsigned long lastBlinkTime = 0;
-bool textVisible = true;
+// F1 data
+int seasonYear = 0;
+int currentRound = 0;
+int upcomingRound = 0;
+int totalRounds = 0;
+bool roundKnown = false;
+bool constructorsLoaded = false;
+bool driversLoaded = false;
+bool raceLoaded = false;
+bool hasUpcomingRace = false;
+int constructorCount = 0;
+int driverCount = 0;
+String raceErrorMsg = "";
+String raceName = "";
+time_t raceStart = 0;
+time_t qualiStart = 0;  // 0 = no qualifying info
+String constructorTop, constructorBottom, driverTop, driverBottom;
+String carSymbol, carLine;
 
-bool waitingForNextData = false;
+// weather data
+bool weatherLoaded = false;
+float currentTemp = 0, futureTemp = 0;
+int currentCloud = 0, currentPrecip = 0;
+int futureCloud = 0, futurePrecip = 0;
+
+// data refresh timers (epoch seconds)
 time_t nextDataCheckTime = 0;
 time_t nextWeatherCheckTime = 0;
+bool lastRefreshOk = false;       // false = last full download had a failure -> retry it
+unsigned long lastSuccessMs = 0;  // last time any internet request worked
 
+// calendar screen
+int calPhase = 0;
+String calText = "";
+int calScrollIdx = 0;
+unsigned long calPhaseStart = 0;
+unsigned long calLastStep = 0;
+String calRaceLine = "", calQualiLine = "";
+
+// notifications
 struct Notification {
-    String message;
-    time_t triggerTime;
-    bool triggered;
+  String message;
+  time_t triggerTime;
+  bool triggered;
 };
-
 const int MAX_NOTIFICATIONS = 3;
 Notification notificationQueue[MAX_NOTIFICATIONS];
 int notificationCount = 0;
-int currentNotificationIndex = -1; 
+int currentNotificationIndex = -1;
+String notificationMsg = "";
+unsigned long notifStart = 0;
+unsigned long lastBlinkTime = 0;
+bool textVisible = true;
 
-enum NightModeState { NIGHTMODE_OFF, NIGHTMODE_AUTO, NIGHTMODE_FORCED };
-NightModeState nightModeState = NIGHTMODE_OFF;
-const int NIGHT_START_HOUR = 23;
-const int NIGHT_END_HOUR = 6;
+// buzzer
+bool buzzerActive = false;
+bool buzzerNoteOn = false;
+int buzzerIdx = 0;
+unsigned long buzzerNoteStart = 0;
+
+// backlight / night mode
 bool backlightIsOn = true;
-bool isNight = false;
+bool backlightToggled = false;  // long press flips the automatic state
+int lastNightState = -1;
 
-float currentTemp = 0;
-int currentCloud = 0;
-int currentPrecip = 0;
+// wifi
+bool wifiWasConnected = false;
 
-float futureTemp = 0;
-int futureCloud = 0;
-int futurePrecip = 0;
-
-/*#######################################*/
-/*----------- Data fetching   -----------*/
-
-// for retrying http requests on failure
-String httpGetWithRetry(const String& url, String requestedBy) {
-  HTTPClient http;
-  int maxRetries = 100;
-  int delayMs = 600;
-  int attempt = 0;
-  int httpCode = -1;
-  String payload = "";
-
-  while (attempt < maxRetries) {
-    http.begin(url);
-    httpCode = http.GET();
-
-    if (httpCode == 200) {
-      payload = http.getString();
-      http.end();
-      return payload;
-    }
-
-  #if DEBUG_MODE
-      Serial.println("Request for - " + requestedBy + " .Attempt " + String(attempt + 1) + ": GET failed. HTTP code: " + String(httpCode));
-  #endif
-    http.end();
-    delay(delayMs);
-    attempt++;
-  }
-
-  return "";  // Return empty string to indicate failure
-}
-
-// for getting upcoming race data to display
-void fetchUpcomingRace(const String& url) {
-  String payload = httpGetWithRetry(url, "Calendar(jolpi-ergastAPI)");
-
-  if (payload == "") {
-    lcd.setCursor(0, 0);
-    lcd.print("CALENDAR NOT SET");
-    lcd.setCursor(0, 1);
-    lcd.print("RESET THE DEVICE");
-    delay(1000);
-    Serial.println("Failed to fetch calendar data.");
-    return;
-  }
-
-  JsonDocument filter;
-  JsonObject filterMRData = filter["MRData"].to<JsonObject>();
-  filterMRData["total"] = true;
-  JsonObject filterRaceTable = filterMRData["RaceTable"].to<JsonObject>();
-  JsonObject filterRaces = filterRaceTable["Races"].add<JsonObject>();
-  filterRaces["round"] = true;
-  filterRaces["raceName"] = true;
-  filterRaces["date"] = true;
-  filterRaces["time"] = true;
-  JsonObject filterQualifying = filterRaces["Qualifying"].to<JsonObject>();
-  filterQualifying["date"] = true;
-  filterQualifying["time"] = true;
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
-
-  if (error) {
-    Serial.println("CALENDAR JSON parse error: " + String(error.c_str()));
-    return;
-  }
-
-  JsonObject racesObject = doc["MRData"];
-  totalRounds = (int)racesObject["total"];
-  JsonArray raceList = racesObject["RaceTable"]["Races"].as<JsonArray>();
-
-  if (currentRound >= totalRounds) {
-    raceErrorMsg = "No upcoming race";
-    return;
-  }
-  for (JsonObject raceItem : raceList) {
-    upcomingRound = (int)raceItem["round"];
-
-    if (upcomingRound == currentRound + 1) {
-      raceName = (String)raceItem["raceName"];
-      const char* date = raceItem["date"];
-      const char* time = raceItem["time"];
-      const char* qualDate = raceItem["Qualifying"]["date"];
-      const char* qualTime = raceItem["Qualifying"]["time"];
-
-      raceStart = parseUtcToLocal(date, time);
-      qualiStart = parseUtcToLocal(qualDate, qualTime);
-
-      return;
-    }
-  }
-  raceErrorMsg = "";
-}
-
-// parsing json data for drivers and constructors standings
-void fetchAndFormatStandings(const String& url, bool isConstructor, std::vector<String>& bodyLines) {
-  String payload = httpGetWithRetry(url, "Standings(jolpi-ergastAPI)");
-
-  if (payload == "") {
-    lcd.setCursor(0, 0);
-    lcd.print("STANDING NOT SET");
-    lcd.setCursor(0, 1);
-    lcd.print("RESET THE DEVICE");
-    delay(1000);
-    if (isConstructor) {
-      Serial.println("Failed to fetch constructors standings data.");
-    } else {
-      Serial.println("Failed to fetch drivers standings data.");
-    }
-    return;
-  }
-
-  JsonDocument filter;
-  JsonObject filterMRData = filter.createNestedObject("MRData");
-  JsonObject filterStandingsTable = filterMRData.createNestedObject("StandingsTable");
-  filterStandingsTable["season"] = true;
-  filterStandingsTable["round"] = true;
-  JsonArray filterStandingsLists = filterStandingsTable.createNestedArray("StandingsLists");
-  JsonObject filterList = filterStandingsLists.createNestedObject();
-  JsonArray filterStandingsArray = filterList.createNestedArray(isConstructor ? "ConstructorStandings" : "DriverStandings");
-  JsonObject filterStandingsArrayItem = filterStandingsArray.createNestedObject();
-  filterStandingsArrayItem["position"] = true;
-  filterStandingsArrayItem["points"] = true;
-  filterStandingsArrayItem["wins"] = true;
-
-  if (isConstructor) {
-    JsonObject constructorFilter = filterStandingsArrayItem.createNestedObject("Constructor");
-    constructorFilter["name"] = true;
-  } else {
-    JsonObject driverFilter = filterStandingsArrayItem.createNestedObject("Driver");
-    driverFilter["code"] = true;
-    driverFilter["familyName"] = true;
-  }
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
-
-  if (error) {
-    if (isConstructor) {
-      Serial.println("CONSTRUCTOR JSON parse error: " + String(error.c_str()));
-    } else {
-      Serial.println("DRIVER JSON parse error: " + String(error.c_str()));
-    }
-    return;
-  }
-
-  JsonObject standings = doc["MRData"]["StandingsTable"];
-  seasonYear = standings["season"].as<int>();
-  currentRound = standings["round"].as<int>();
-
-  JsonArray standingsList = standings["StandingsLists"][0][isConstructor ? "ConstructorStandings" : "DriverStandings"];
-
-  bodyLines.clear();
-
-  for (JsonObject standingData : standingsList) {
-    String line = "P" + String(standingData["position"].as<int>()) + " ";
-
-    if (isConstructor) {
-    line += String(standingData["Constructor"]["name"].as<const char*>());
-  } else {
-    if (standingData["Driver"].containsKey("code")) {
-      line += String(standingData["Driver"]["code"].as<const char*>());
-    } else {
-      line += sanitizeForLCD(String(standingData["Driver"]["familyName"].as<const char*>()));
-    }
-  }
-
-    line += " ";
-    int wins = standingData["wins"].as<int>();  //saving space by only showing more then 0 wins
-    if (wins > 0) {
-      line += String(wins) + "w ";
-    }
-    line += String(standingData["points"].as<const char*>()) + "pts";
-
-    bodyLines.push_back(line);
-  }
-}
-
-// for getting latitude and longitude for weather and IP address for Timezone
-void fetchLocation() {
-  String url = "http://ip-api.com/json";
-
-  String payload = httpGetWithRetry(url, "Location(ipAPI)");
-
-  if (payload == "") {
-    lcd.setCursor(0, 0);
-    lcd.print("LOCATION NOT SET");
-    lcd.setCursor(0, 1);
-    lcd.print("RESET THE DEVICE");
-    delay(1000);
-    Serial.println("Failed to fetch location data.");
-    return;
-  }
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload);
-
-  if (error) {
-    Serial.println("LOCATION JSON parse error: " + String(error.c_str()));
-    return;
-  }
-
-  latitude = doc["lat"].as<float>();
-  longitude = doc["lon"].as<float>();
-  ipAddress = doc["query"].as<String>();
-
-  #if DEBUG_MODE
-    Serial.print("Location: ");
-    Serial.print(" (");
-    Serial.print(latitude, 4);
-    Serial.print(", ");
-    Serial.print(longitude, 4);
-    Serial.println(")");
-    Serial.print("Ip Address: ");
-    Serial.println(ipAddress);
-  #endif
-
-  fetchAndSetTimezone();
-}
-
-// for getting timezone with day light savings / setting local time
-void fetchAndSetTimezone() {
-  String url = "http://worldtimeapi.org/api/ip";
-  url += "/" + ipAddress;
-
-  String payload = httpGetWithRetry(url, "Timezone(worldTimeAPI)");
-
-  if (payload == "") {
-    lcd.setCursor(0, 0);
-    lcd.print("TIMEZONE NOT SET");
-    lcd.setCursor(0, 1);
-    lcd.print("RESET THE DEVICE");
-    delay(1000);
-    Serial.println("Failed to fetch timezone data.");
-    return;
-  }
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload);
-
-  if (error) {
-    Serial.println("TIMEZONE JSON parse error: " + String(error.c_str()));
-    return;
-  }
-
-  int rawOffset = doc["raw_offset"];
-  int dstOffset = doc["dst_offset"];
-
-  utcOffsetSeconds = rawOffset + dstOffset;
-
-  configTime(utcOffsetSeconds, 0, ntpServer1, ntpServer2);
-
-  #if DEBUG_MODE
-    Serial.print("Raw Offset: ");
-    Serial.println(rawOffset);
-    Serial.print("DST Offset: ");
-    Serial.println(dstOffset);
-    Serial.print("Using UTC Offset (total): ");
-    Serial.println(utcOffsetSeconds);
-  #endif
-}
-
-// for fetching weather information
-void fetchCurrentWeather() {
-  String url = "http://api.open-meteo.com/v1/forecast?";
-  url += "latitude=" + String(latitude, 4);
-  url += "&longitude=" + String(longitude, 4);
-  url += "&hourly=apparent_temperature,precipitation_probability,cloud_cover&timezone=auto&forecast_days=2";
-
-  String payload = httpGetWithRetry(url, "Weather(open-meteo)");
-
-  if (payload == "") {
-    lcd.setCursor(0, 0);
-    lcd.print("WEATHER  NOT SET");
-    lcd.setCursor(0, 1);
-    lcd.print("RESET THE DEVICE");
-    delay(1000);
-    Serial.println("Failed to fetch weather data.");
-    return;
-  }
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload);
-
-  if (error) {
-    Serial.println("WEATHER JSON parse error: " + String(error.c_str()));
-    return;
-  }
-
-  time_t now = time(nullptr);
-  struct tm *timeinfo = localtime(&now);
-  int currentHour = timeinfo->tm_hour;
-
-  JsonObject hourly = doc["hourly"];
-  JsonArray tempArray = hourly["apparent_temperature"];
-  JsonArray cloudArray = hourly["cloud_cover"];
-  JsonArray precipArray = hourly["precipitation_probability"];
-
-  currentTemp = tempArray[currentHour];
-  currentCloud = cloudArray[currentHour];
-  currentPrecip = precipArray[currentHour];
-
-  futureTemp = tempArray[currentHour + 4];
-  futureCloud = cloudArray[currentHour + 4];
-  futurePrecip = precipArray[currentHour + 4];
-
-  #if DEBUG_MODE
-    Serial.println("Weather data fetched:");
-    Serial.print("Now: ");
-    Serial.print(currentTemp); Serial.print("°C, ");
-    Serial.print(currentCloud); Serial.print("% clouds, ");
-    Serial.print(currentPrecip); Serial.println("% precip");
-
-    Serial.print("+4h: ");
-    Serial.print(futureTemp); Serial.print("°C, ");
-    Serial.print(futureCloud); Serial.print("% clouds, ");
-    Serial.print(futurePrecip); Serial.println("% precip");
-  #endif
-}
-
-// for just getting round to know if data needs re-fetching
-int fetchCurrentRound() {
-  String url = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
-  String payload = httpGetWithRetry(url, "StandingCheck(jolpi-ergastAPI)");
-
-  if (payload == "") {
-    Serial.println("Failed to fetch current round data.");
-    return -1; 
-  }
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, payload);
-
-  if (error) {
-    Serial.println("Round check JSON error");
-    return -1;
-  }
-
-  int round = doc["MRData"]["StandingsTable"]["round"].as<int>();
-  return round;
-}
-
-// for getting all data from ergast APIs
-void refreshAllData() {
-
-  String constructorURL = "";
-  String driverURL = "";
-  String raceURL = "";
-
-  if (ChosenSeasonYear > 0) {
-    constructorURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/constructorstandings/?format=json";
-    driverURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/driverstandings/?format=json";
-    raceURL = "https://api.jolpi.ca/ergast/f1/" + String(ChosenSeasonYear) + "/races/?format=json";
-  } else {
-    constructorURL = "https://api.jolpi.ca/ergast/f1/current/constructorstandings/?format=json";
-    driverURL = "https://api.jolpi.ca/ergast/f1/current/driverstandings/?format=json";
-    raceURL = "https://api.jolpi.ca/ergast/f1/current/races/?format=json";
-  }
-
-
-  fetchAndFormatStandings(constructorURL, true, constructorLines);
-  delay(1000);
-
-  fetchAndFormatStandings(driverURL, false, driverLines);
-  delay(1000);
-
-  fetchUpcomingRace(raceURL);
-
-  scheduleRaceNotifications();
-
-  waitingForNextData = false;
-  if (upcomingRound > 0) {
-    nextDataCheckTime = raceStart + 3 * 60 * 60;
-    waitingForNextData = true;
-
-    #if DEBUG_MODE
-      Serial.print("Quali start at: ");
-      Serial.println(ctime(&qualiStart));
-      Serial.print("Race start at: ");
-      Serial.println(ctime(&raceStart));
-      Serial.print("First standings check scheduled at: ");
-      Serial.println(ctime(&nextDataCheckTime));
-    #endif
-  }
-
-}
-
-// for checking if there is newer data
-void checkForNewDataIfTime() {
-  time_t now = time(nullptr);
-
-  // Race round check
-  if (waitingForNextData && now >= nextDataCheckTime) {
-    int fetchedRound = fetchCurrentRound();
-    if (fetchedRound > currentRound) {
-      refreshAllData();
-    } else {
-      nextDataCheckTime = now + 30 * 60;
-    }
-  }
-
-  // Weather update check
-  if (now >= nextWeatherCheckTime) {
-    fetchCurrentWeather();
-    nextWeatherCheckTime = now + 60 * 60;  // Next weather update in 1 hour
-  }
-}
-
-// for scheduling each notification
-void scheduleRaceNotifications() {
-    notificationCount = 0; // reset queue
-
-    // --- 1-hour before quali ---
-    notificationQueue[notificationCount].message = "Make Predictions";
-    notificationQueue[notificationCount].triggerTime = qualiStart - 60*60;
-    notificationQueue[notificationCount].triggered = false;
-    notificationCount++;
-
-    // --- 5-min before quali ---
-    notificationQueue[notificationCount].message = " Quali in 5 min ";
-    notificationQueue[notificationCount].triggerTime = qualiStart - 5*60;
-    notificationQueue[notificationCount].triggered = false;
-    notificationCount++;
-
-    // --- 5-min before race ---
-    notificationQueue[notificationCount].message = " Race in 5 min! ";
-    notificationQueue[notificationCount].triggerTime = raceStart - 5*60;
-    notificationQueue[notificationCount].triggered = false;
-    notificationCount++;
-
-  #if DEBUG_MODE  
-    Serial.println("Notifications scheduled:");
-    for (int i = 0; i < notificationCount; i++) {
-        Serial.print(" - ");
-        Serial.print(notificationQueue[i].message);
-        Serial.print(" at ");
-        Serial.println(ctime(&notificationQueue[i].triggerTime));
-    }
-  #endif
-}
-/*----------- Data fetching   -----------*/
+/*----------------- State ---------------*/
 /*#######################################*/
 
-/*#######################################*/
-/*----------- Helper functions-----------*/
+// forward declarations
+void advanceStage();
+void switchTo(DisplayStage s);
 
-// for cleaning up characters not recognised by lcd 1602
+/*#######################################*/
+/*----------- Helper functions ----------*/
+
+bool timeIsValid() {
+  return time(nullptr) > MIN_VALID_TIME;
+}
+
+bool isNightHour(int hour) {
+  return (hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR);
+}
+
+// starts (or restarts) background time sync. The ESP32 then keeps the clock
+// updated by itself and applies summer/winter time from TIMEZONE.
+void startTimeSync() {
+  configTzTime(TIMEZONE, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+}
+
+// shows 2 lines of text on the lcd
+void showMessage(const char* line1, const char* line2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+  lcd.setCursor(0, 1);
+  lcd.print(line2);
+}
+
+// returns exactly 16 characters starting at "from" (padded with spaces)
+String slice16(const String& s, int from) {
+  String out = "";
+  if (from < (int)s.length()) out = s.substring(from, from + 16);
+  while (out.length() < 16) out += ' ';
+  return out;
+}
+
+// cleans up characters not available on the lcd 1602
 String sanitizeForLCD(String input) {
-  input.replace("ü", "u");
-  input.replace("Ü", "U");
-  input.replace("ö", "o");
-  input.replace("Ö", "O");
-  input.replace("ä", "a");
-  input.replace("Ä", "A");
-  input.replace("ã", "a");
-  input.replace("Ã", "A");
-  input.replace("ñ", "n");
-  input.replace("Ñ", "N");
-  input.replace("é", "e");
-  input.replace("É", "E");
-  input.replace("è", "e");
-  input.replace("È", "E");
-  input.replace("á", "a");
-  input.replace("Á", "A");
-  input.replace("à", "a");
-  input.replace("À", "A");
-  input.replace("ê", "e");
-  input.replace("Ê", "E");
-  input.replace("ô", "o");
-  input.replace("Ô", "O");
-  input.replace("í", "i");
-  input.replace("Í", "I");
-  input.replace("ó", "o");
-  input.replace("Ó", "O");
-  input.replace("ç", "c");
-  input.replace("Ç", "C");
+  static const char* const FROM[] = { "ü", "Ü", "ö", "Ö", "ä", "Ä", "ã", "Ã", "ñ", "Ñ", "é", "É", "è", "È", "á", "Á", "à", "À", "ê", "Ê", "ô", "Ô", "í", "Í", "ó", "Ó", "ç", "Ç", "ø", "Ø", "å", "Å", "ë", "ï", "ú", "Ú", "ć", "č", "š", "ž", "ł", "ń", "ś", "ß" };
+  static const char* const TO[] = { "u", "U", "o", "O", "a", "A", "a", "A", "n", "N", "e", "E", "e", "E", "a", "A", "a", "A", "e", "E", "o", "O", "i", "I", "o", "O", "c", "C", "o", "O", "a", "A", "e", "i", "u", "U", "c", "c", "s", "z", "l", "n", "s", "ss" };
+  const int n = sizeof(FROM) / sizeof(FROM[0]);
+  for (int i = 0; i < n; i++) input.replace(FROM[i], TO[i]);
 
-  return input;
-}
-
-// for setting upcomming race time to local
-time_t parseUtcToLocal(const char* dateStr, const char* timeStr) {
-  struct tm tm = {};
-  String isoString = String(dateStr) + "T" + String(timeStr);
-  strptime(isoString.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
-  tm.tm_isdst = -1;
-
-  // Get time as UTC
-  time_t utcTime = mktime(&tm);
-
-  // Apply dynamic UTC offset
-  return utcTime + utcOffsetSeconds;
-}
-
-// for switching backlight
-void setBacklight(bool on) {
-    if (on && !backlightIsOn) {
-        lcd.backlight();
-        backlightIsOn = true;
-    } else if (!on && backlightIsOn) {
-        lcd.noBacklight();
-        backlightIsOn = false;
-    }
-}
-
-// Checks time and updates auto/forced night mode
-void checkNightMode() {
-  static int lastHour = -1;
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) return;
-
-  int hour = timeinfo.tm_hour;
-  isNight = (hour >= NIGHT_START_HOUR || hour < NIGHT_END_HOUR);
-  bool shouldDim = false;
-
-  switch (nightModeState) {
-    case NIGHTMODE_AUTO:
-      shouldDim = isNight;
-    break;
-
-    case NIGHTMODE_FORCED:
-      shouldDim = true;
-      if (hour == NIGHT_END_HOUR && hour != lastHour) {
-        nightModeState = NIGHTMODE_AUTO;
-      }
-    break;
-
-    case NIGHTMODE_OFF:
-      shouldDim = false;
-      if (hour == NIGHT_START_HOUR && hour != lastHour) {
-        nightModeState = NIGHTMODE_AUTO;
-      }
-    break;
+  // anything still non-ASCII is dropped so the lcd never shows garbage
+  String out = "";
+  for (unsigned int i = 0; i < input.length(); i++) {
+    unsigned char c = (unsigned char)input[i];
+    if (c >= 32 && c < 127) out += (char)c;
   }
-
-  lastHour = hour;
-  setBacklight(!shouldDim);
+  return out;
 }
 
-// for constructing a custom car symbol
-String constructCarSymbol() {
+// converts a UTC date/time to epoch seconds WITHOUT using the time zone.
+// (the API gives UTC; the lcd later converts to local time automatically)
+time_t utcToEpoch(int y, int m, int d, int hh, int mm, int ss) {
+  y -= (m <= 2);
+  long era = (y >= 0 ? y : y - 399) / 400;
+  unsigned yoe = (unsigned)(y - era * 400);
+  unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  long days = era * 146097L + (long)doe - 719468L;
+  return (time_t)days * 86400 + hh * 3600 + mm * 60 + ss;
+}
+
+// parses "2026-10-25" + "13:00:00Z" (UTC) into epoch seconds
+time_t parseUtc(const char* dateStr, const char* timeStr) {
+  int y = 1970, mo = 1, d = 1, h = 0, mi = 0, s = 0;
+  if (dateStr) sscanf(dateStr, "%d-%d-%d", &y, &mo, &d);
+  if (timeStr) sscanf(timeStr, "%d:%d:%d", &h, &mi, &s);
+  return utcToEpoch(y, mo, d, h, mi, s);
+}
+
+// loads the 4 custom characters used for the little race car
+void createCarChars() {
   lcd.createChar(1, formula1_1);
   lcd.createChar(2, formula1_2);
   lcd.createChar(3, formula1_3);
   lcd.createChar(4, formula1_4);
-  String carSymbol = String((char)1) + String((char)2) + String((char)3) + String((char)4);
-
-  return carSymbol;
 }
 
-// for setting up audio buzzer
+void setBacklight(bool on) {
+  if (on && !backlightIsOn) {
+    lcd.backlight();
+    backlightIsOn = true;
+  } else if (!on && backlightIsOn) {
+    lcd.noBacklight();
+    backlightIsOn = false;
+  }
+}
+
+// Night mode: backlight is off between NIGHT_START_HOUR and NIGHT_END_HOUR.
+// A long press flips the current state; the flip is cancelled at the next
+// automatic change (so you never end up with a permanently dark or bright display).
+void updateBacklight() {
+  if (!timeIsValid()) return;
+  time_t now = time(nullptr);
+  struct tm t;
+  localtime_r(&now, &t);
+  int night = isNightHour(t.tm_hour) ? 1 : 0;
+  if (night != lastNightState) {
+    lastNightState = night;
+    backlightToggled = false;
+  }
+  setBacklight((night == 1) == backlightToggled);
+}
+
+// true if the device has had no internet data for a long time (shows "!" on clock)
+bool isOffline() {
+  return WiFi.status() != WL_CONNECTED || (millis() - lastSuccessMs) > OFFLINE_WARNING_MS;
+}
+
+// WiFi watchdog: reconnects automatically after a router restart
+void maintainWiFi() {
+  static unsigned long lastRetry = 0;
+  bool connected = (WiFi.status() == WL_CONNECTED);
+  if (connected) {
+    if (!wifiWasConnected && !timeIsValid()) startTimeSync();
+    wifiWasConnected = true;
+  } else {
+    wifiWasConnected = false;
+    if (millis() - lastRetry > 30000) {
+      lastRetry = millis();
+      WiFi.reconnect();
+    }
+  }
+}
+
+// Restarts the device at most once a week (default Monday 04:xx), and ONLY
+// if there has been no working internet for 6 hours. A restart resets the
+// "last success" timer, so it can never loop.
+void checkWeeklyRestart() {
+  if ((millis() - lastSuccessMs) < RESTART_OFFLINE_MS) return;
+  if (!timeIsValid()) return;
+  time_t now = time(nullptr);
+  struct tm t;
+  localtime_r(&now, &t);
+  if (t.tm_wday == RESTART_WEEKDAY && t.tm_hour == RESTART_HOUR) {
+    DBG("Weekly restart (no internet for a long time)");
+    ESP.restart();
+  }
+}
+
+// things that only need to run once per second
+void housekeeping() {
+  static unsigned long last = 0;
+  if (millis() - last < 1000) return;
+  last = millis();
+  maintainWiFi();
+  updateBacklight();
+  checkWeeklyRestart();
+}
+
+/*----------- Helper functions ----------*/
+/*#######################################*/
+
+/*#######################################*/
+/*------------- Data fetching -----------*/
+
+// HTTPS GET with timeout and a few retries. Returns "" on failure.
+// NOTE: setInsecure() skips certificate checking. That is fine here: the data
+// is public (standings/weather) and nothing secret is sent.
+String httpGet(const String& url, const char* what, int retries) {
+  for (int attempt = 1; attempt <= retries; attempt++) {
+    if (WiFi.status() != WL_CONNECTED) return "";
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.setConnectTimeout(HTTP_TIMEOUT_MS);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+    String payload = "";
+    if (http.begin(client, url)) {
+      int code = http.GET();
+      if (code == HTTP_CODE_OK) {
+        payload = http.getString();
+      } else {
+        DBG(String(what) + ": attempt " + String(attempt) + " failed, HTTP " + String(code));
+      }
+      http.end();
+    }
+
+    if (payload.length() > 0) {
+      lastSuccessMs = millis();
+      return payload;
+    }
+    if (attempt < retries) delay(1000);
+  }
+  return "";
+}
+
+String f1BaseUrl() {
+  return String("https://api.jolpi.ca/ergast/f1/") + F1_SEASON;
+}
+
+// downloads standings and builds the two scrolling text rows
+bool fetchStandings(const String& url, bool isConstructor, String& topOut, String& bottomOut, int& countOut) {
+  String payload = httpGet(url, isConstructor ? "Constructors" : "Drivers", 2);
+  if (payload == "") return false;
+
+  const char* listKey = isConstructor ? "ConstructorStandings" : "DriverStandings";
+
+  // filter: only keep the fields we need (saves a lot of memory)
+  JsonDocument filter;
+  JsonObject fTable = filter["MRData"].to<JsonObject>()["StandingsTable"].to<JsonObject>();
+  fTable["season"] = true;
+  fTable["round"] = true;
+  JsonArray fLists = fTable["StandingsLists"].to<JsonArray>();
+  JsonObject fList = fLists.add<JsonObject>();
+  JsonArray fItems = fList[listKey].to<JsonArray>();
+  JsonObject fItem = fItems.add<JsonObject>();
+  fItem["position"] = true;
+  fItem["points"] = true;
+  fItem["wins"] = true;
+  if (isConstructor) {
+    fItem["Constructor"]["name"] = true;
+  } else {
+    fItem["Driver"]["code"] = true;
+    fItem["Driver"]["familyName"] = true;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+  if (error) {
+    DBG(String("Standings JSON error: ") + error.c_str());
+    return false;
+  }
+
+  JsonObject table = doc["MRData"]["StandingsTable"];
+  seasonYear = table["season"].as<int>();
+  currentRound = table["round"].as<int>();
+  roundKnown = true;
+
+  JsonArray list = table["StandingsLists"][0][listKey];
+
+  std::vector<String> lines;
+  for (JsonObject item : list) {
+    String line = "P" + String(item["position"].as<int>()) + " ";
+
+    if (isConstructor) {
+      const char* name = item["Constructor"]["name"].as<const char*>();
+      line += sanitizeForLCD(name ? name : "?");
+    } else {
+      const char* code = item["Driver"]["code"].as<const char*>();
+      if (code) {
+        line += code;
+      } else {
+        const char* fam = item["Driver"]["familyName"].as<const char*>();
+        line += sanitizeForLCD(fam ? fam : "?");
+      }
+    }
+
+    line += " ";
+    int wins = item["wins"].as<int>();
+    if (wins > 0) line += String(wins) + "w ";  // only show wins when above 0 (saves space)
+    const char* pts = item["points"].as<const char*>();
+    line += String(pts ? pts : "0") + "pts";
+    lines.push_back(line);
+  }
+
+  // build the two ticker rows once (cars alternate between top and bottom row)
+  String top = "            ";
+  String bottom = "                    ";
+  for (size_t i = 0; i < lines.size(); i++) {
+    String entry = "    " + carSymbol + "  " + lines[i];
+    if (i % 2 == 0) top += entry;
+    else bottom += entry;
+  }
+  topOut = top;
+  bottomOut = bottom;
+  countOut = (int)lines.size();
+  return true;
+}
+
+// finds the next race (and its qualifying time)
+bool fetchUpcomingRace(const String& url) {
+  String payload = httpGet(url, "Calendar", 2);
+  if (payload == "") return false;
+
+  JsonDocument filter;
+  JsonObject fMD = filter["MRData"].to<JsonObject>();
+  fMD["total"] = true;
+  JsonObject fRT = fMD["RaceTable"].to<JsonObject>();
+  JsonArray fRaces = fRT["Races"].to<JsonArray>();
+  JsonObject fRace = fRaces.add<JsonObject>();
+  fRace["round"] = true;
+  fRace["raceName"] = true;
+  fRace["date"] = true;
+  fRace["time"] = true;
+  fRace["Qualifying"]["date"] = true;
+  fRace["Qualifying"]["time"] = true;
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+  if (error) {
+    DBG(String("Calendar JSON error: ") + error.c_str());
+    return false;
+  }
+
+  totalRounds = doc["MRData"]["total"].as<int>();
+  JsonArray races = doc["MRData"]["RaceTable"]["Races"].as<JsonArray>();
+
+  hasUpcomingRace = false;
+  raceErrorMsg = "";
+
+  if (currentRound >= totalRounds) {
+    raceErrorMsg = "No upcoming race";
+    return true;
+  }
+
+  for (JsonObject r : races) {
+    int round = r["round"].as<int>();
+    if (round != currentRound + 1) continue;
+
+    const char* name = r["raceName"].as<const char*>();
+    const char* date = r["date"].as<const char*>();
+    const char* rTime = r["time"].as<const char*>();
+    const char* qDate = r["Qualifying"]["date"].as<const char*>();
+    const char* qTime = r["Qualifying"]["time"].as<const char*>();
+
+    if (!date) break;
+    raceStart = parseUtc(date, rTime);
+    qualiStart = qDate ? parseUtc(qDate, qTime) : 0;
+    raceName = sanitizeForLCD(name ? name : "Grand Prix");
+    upcomingRound = round;
+    hasUpcomingRace = true;
+    return true;
+  }
+
+  raceErrorMsg = "Race not found";
+  return true;
+}
+
+// weather for now and +4 hours (location is hardcoded in USER SETTINGS)
+bool fetchCurrentWeather() {
+  if (!timeIsValid()) return false;  // we need the real hour to pick the right forecast entry
+
+  String url = "https://api.open-meteo.com/v1/forecast?";
+  url += "latitude=" + String(LATITUDE, 4);
+  url += "&longitude=" + String(LONGITUDE, 4);
+  url += "&hourly=apparent_temperature,precipitation_probability,cloud_cover&timezone=auto&forecast_days=2";
+
+  String payload = httpGet(url, "Weather", 2);
+  if (payload == "") return false;
+
+  JsonDocument filter;
+  filter["hourly"]["apparent_temperature"] = true;
+  filter["hourly"]["precipitation_probability"] = true;
+  filter["hourly"]["cloud_cover"] = true;
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+  if (error) {
+    DBG(String("Weather JSON error: ") + error.c_str());
+    return false;
+  }
+
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  localtime_r(&now, &timeinfo);
+  int h = timeinfo.tm_hour;
+
+  JsonArray tempArray = doc["hourly"]["apparent_temperature"];
+  JsonArray cloudArray = doc["hourly"]["cloud_cover"];
+  JsonArray precipArray = doc["hourly"]["precipitation_probability"];
+
+  if ((int)tempArray.size() < h + 5 || (int)cloudArray.size() < h + 5 || (int)precipArray.size() < h + 5) return false;
+
+  currentTemp = tempArray[h].as<float>();
+  currentCloud = cloudArray[h].as<int>();
+  currentPrecip = precipArray[h].as<int>();
+  futureTemp = tempArray[h + 4].as<float>();
+  futureCloud = cloudArray[h + 4].as<int>();
+  futurePrecip = precipArray[h + 4].as<int>();
+  weatherLoaded = true;
+
+  DBG(String("Weather now: ") + currentTemp + "C " + currentCloud + "% clouds " + currentPrecip + "% rain");
+  return true;
+}
+
+// light request: only asks which round the standings are at
+int fetchCurrentRound() {
+  String payload = httpGet(f1BaseUrl() + "/driverstandings/?format=json", "RoundCheck", 2);
+  if (payload == "") return -1;
+
+  JsonDocument filter;
+  filter["MRData"]["StandingsTable"]["round"] = true;
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload, DeserializationOption::Filter(filter));
+  if (error) return -1;
+  return doc["MRData"]["StandingsTable"]["round"].as<int>();
+}
+
+// 3 reminders per race weekend (quali notifications are skipped if there is no quali time)
+void scheduleRaceNotifications() {
+  notificationCount = 0;
+  if (!hasUpcomingRace) return;
+
+  if (qualiStart > 0) {
+    notificationQueue[notificationCount].message = "Make Predictions";
+    notificationQueue[notificationCount].triggerTime = qualiStart - 60 * 60;
+    notificationQueue[notificationCount].triggered = false;
+    notificationCount++;
+
+    notificationQueue[notificationCount].message = " Quali in 5 min ";
+    notificationQueue[notificationCount].triggerTime = qualiStart - 5 * 60;
+    notificationQueue[notificationCount].triggered = false;
+    notificationCount++;
+  }
+
+  notificationQueue[notificationCount].message = " Race in 5 min! ";
+  notificationQueue[notificationCount].triggerTime = raceStart - 5 * 60;
+  notificationQueue[notificationCount].triggered = false;
+  notificationCount++;
+}
+
+// downloads everything from the F1 API and schedules the next refresh
+void refreshAllData() {
+  String base = f1BaseUrl();
+
+  bool okC = fetchStandings(base + "/constructorstandings/?format=json", true, constructorTop, constructorBottom, constructorCount);
+  if (okC) constructorsLoaded = true;
+  delay(500);
+
+  bool okD = fetchStandings(base + "/driverstandings/?format=json", false, driverTop, driverBottom, driverCount);
+  if (okD) driversLoaded = true;
+  delay(500);
+
+  // the "next race" needs a known round number, so only ask once standings worked
+  bool okR = false;
+  if (roundKnown) {
+    okR = fetchUpcomingRace(base + "/races/?format=json");
+    if (okR) raceLoaded = true;
+  }
+
+  scheduleRaceNotifications();
+
+  time_t now = time(nullptr);
+  lastRefreshOk = (okC && okD && okR);
+  if (!lastRefreshOk) {
+    nextDataCheckTime = now + 5 * 60;  // something failed: try again in 5 minutes
+  } else if (hasUpcomingRace) {
+    // check for new standings 3 hours after the race starts
+    time_t t = raceStart + 3 * 60 * 60;
+    if (t < now + 10 * 60) t = now + 10 * 60;
+    nextDataCheckTime = t;
+  } else {
+    nextDataCheckTime = now + 24 * 60 * 60;  // off-season: look again tomorrow
+  }
+}
+
+// decides when to re-download data (runs from loop)
+void checkForNewDataIfTime() {
+  if (displayStage == STAGE_NOTIFICATION) return;  // never stall the alert
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!timeIsValid()) return;
+
+  time_t now = time(nullptr);
+
+  if (now >= nextDataCheckTime) {
+    if (!lastRefreshOk || !hasUpcomingRace) {
+      refreshAllData();
+    } else {
+      int fetchedRound = fetchCurrentRound();
+      if (fetchedRound > currentRound) refreshAllData();
+      else nextDataCheckTime = now + 30 * 60;
+    }
+  }
+
+  if (now >= nextWeatherCheckTime) {
+    bool ok = fetchCurrentWeather();
+    nextWeatherCheckTime = now + (ok ? 60 * 60 : 5 * 60);
+  }
+}
+
+/*------------- Data fetching -----------*/
+/*#######################################*/
+
+/*#######################################*/
+/*------------- Buzzer / input ----------*/
+
 void startBuzzer() {
-  buzzerPlay.scrollIndex = 0;
-  buzzerPlay.startTime = millis();
-  buzzerPlay.state = 1;
-  pinMode(BUZZER_PIN, OUTPUT);
+  buzzerActive = true;
+  buzzerNoteOn = false;
+  buzzerIdx = 0;
 }
 
-// for playing audio in notification stage
+// non-blocking melody player
 void updateBuzzer() {
-  if (buzzerPlay.state == 0) return;
+  if (!buzzerActive) return;
   const int NUM_NOTES = sizeof(v2melody) / sizeof(v2melody[0]);
   unsigned long now = millis();
 
-  if (buzzerPlay.scrollIndex >= NUM_NOTES) {
-    buzzerPlay.state = 0;
-    buzzerState = BUZZER_IDLE;
-    noTone(BUZZER_PIN);
+  if (!buzzerNoteOn) {
+    if (buzzerIdx >= NUM_NOTES) {
+      noTone(BUZZER_PIN);
+      buzzerActive = false;
+      return;
+    }
+    int noteDuration = 1000 / v2durations[buzzerIdx];
+    if (v2melody[buzzerIdx] > 0) tone(BUZZER_PIN, v2melody[buzzerIdx], noteDuration);
+    buzzerNoteStart = now;
+    buzzerNoteOn = true;
+  } else {
+    int noteDuration = 1000 / v2durations[buzzerIdx];
+    if (now - buzzerNoteStart >= (unsigned long)(noteDuration + 20)) {
+      noTone(BUZZER_PIN);
+      buzzerIdx++;
+      buzzerNoteOn = false;
+    }
+  }
+}
+
+// short press = next screen, long press (2 s) = flip night backlight
+void handleButtonPress() {
+  static bool lastReading = HIGH;
+  static bool stableState = HIGH;
+  static unsigned long lastChange = 0;
+  static unsigned long pressedAt = 0;
+  static bool longHandled = false;
+  const unsigned long debounceMs = 50;
+  const unsigned long longPressMs = 2000;
+
+  bool reading = digitalRead(BLUE_BUTTON);
+  if (reading != lastReading) {
+    lastChange = millis();
+    lastReading = reading;
+  }
+
+  if ((millis() - lastChange) > debounceMs && reading != stableState) {
+    stableState = reading;
+    if (stableState == LOW) {
+      pressedAt = millis();
+      longHandled = false;
+    } else if (!longHandled) {
+      advanceStage();  // released after a short press
+    }
+  }
+
+  if (stableState == LOW && !longHandled && (millis() - pressedAt) >= longPressMs) {
+    longHandled = true;
+    backlightToggled = !backlightToggled;
+    updateBacklight();
+  }
+}
+
+// triggers a scheduled notification when its time comes
+void checkNotifications() {
+  if (currentNotificationIndex != -1) return;  // one at a time
+  if (!timeIsValid()) return;
+  time_t now = time(nullptr);
+
+  for (int i = 0; i < notificationCount; i++) {
+    Notification& n = notificationQueue[i];
+    if (!n.triggered && now >= n.triggerTime && now < n.triggerTime + 5 * 60) {
+      n.triggered = true;
+      notificationMsg = n.message;
+      currentNotificationIndex = i;
+      hasPending = false;
+      switchTo(STAGE_NOTIFICATION);
+      DBG(String("Notification: ") + n.message);
+      return;
+    }
+  }
+}
+
+/*------------- Buzzer / input ----------*/
+/*#######################################*/
+
+/*#######################################*/
+/*------------ Screen handling ----------*/
+
+// is there anything to show on this screen?
+bool stageAvailable(DisplayStage s) {
+  switch (s) {
+    case STAGE_WEATHER: return weatherLoaded;
+    case STAGE_CONSTRUCTORS: return constructorsLoaded && constructorCount > 0;
+    case STAGE_DRIVERS: return driversLoaded && driverCount > 0;
+    case STAGE_CALENDAR: return raceLoaded;
+    default: return true;
+  }
+}
+
+// order: Clock -> Weather -> Constructors -> Drivers -> Calendar -> Clock
+// (screens without data are skipped)
+DisplayStage nextStageInCycle(DisplayStage s) {
+  DisplayStage n = s;
+  for (int i = 0; i < 6; i++) {
+    switch (n) {
+      case STAGE_CLOCK: n = STAGE_WEATHER; break;
+      case STAGE_WEATHER: n = STAGE_CONSTRUCTORS; break;
+      case STAGE_CONSTRUCTORS: n = STAGE_DRIVERS; break;
+      case STAGE_DRIVERS: n = STAGE_CALENDAR; break;
+      default: n = STAGE_CLOCK; break;
+    }
+    if (n == STAGE_CLOCK || stageAvailable(n)) return n;
+  }
+  return STAGE_CLOCK;
+}
+
+// enters a screen with a clean state
+void switchTo(DisplayStage s) {
+  displayStage = s;
+  stageInitialized = false;
+  lastStageChange = millis();
+  lastDateStr = "";
+  clockLastUpdate = 0;
+  calPhase = 0;
+  if (s != STAGE_NOTIFICATION) currentNotificationIndex = -1;
+  buzzerActive = false;
+  noTone(BUZZER_PIN);
+  lcd.clear();
+}
+
+// moves to the next screen. Between two data screens the clock is shown for 3 s.
+void advanceStage() {
+  // pressed (or timer ended) during the 3 s clock -> go to the waiting screen
+  if (hasPending) {
+    hasPending = false;
+    switchTo(pendingStage);
     return;
   }
 
-  //int noteDuration = 1100 / durations[buzzerPlay.scrollIndex];
-  int noteDuration = 1000 / v2durations[buzzerPlay.scrollIndex];
-  int gap = 20;  
+  DisplayStage next = nextStageInCycle(displayStage);
+  bool fromDataScreen = (displayStage != STAGE_CLOCK && displayStage != STAGE_NOTIFICATION);
 
-  switch (buzzerState) {
-    case BUZZER_IDLE:
-      buzzerPlay.startTime = now;
-      buzzerState = BUZZER_PLAYING_NOTE;
-
-    case BUZZER_PLAYING_NOTE:
-      if (v2melody[buzzerPlay.scrollIndex] > 0) {
-        tone(BUZZER_PIN, v2melody[buzzerPlay.scrollIndex], noteDuration);
-      }
-      buzzerPlay.startTime = now;
-      buzzerState = BUZZER_RESTING;
-      break;
-
-    case BUZZER_RESTING:
-      if (now - buzzerPlay.startTime >= noteDuration + gap) {
-        noTone(BUZZER_PIN);
-        buzzerPlay.scrollIndex++;
-        buzzerState = BUZZER_IDLE;
-      }
-      break;
+  if (fromDataScreen && next != STAGE_CLOCK) {
+    pendingStage = next;
+    hasPending = true;
+    interludeUntil = millis() + CLOCK_INTERLUDE_MS;
+    next = STAGE_CLOCK;
   }
+  switchTo(next);
 }
 
-// setting up wifi and taking in custom season year
-void setupWiFiAndSeason() {
-  WiFiManager wm;
-  wm.setConfigPortalTimeout(180);
-  WiFiManagerParameter seasonYearParam("season", "Enter F1 season year", "", 5);
-  wm.addParameter(&seasonYearParam);
-  bool connected = false;
-  bool forcePortal = false;
-
-  if (digitalRead(BLUE_BUTTON) == LOW) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Resetting WiFi...");
-    delay(1500);
-    if (digitalRead(BLUE_BUTTON) == LOW) {
-      wm.resetSettings();
-      forcePortal = true;
-    }
-  }
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Checking WiFi...");
-
-  if (!forcePortal) {
-    WiFi.begin();
-    unsigned long startAttemptTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 8000) {
-      delay(500);
-    }
-    connected = (WiFi.status() == WL_CONNECTED);
-  }
-
-  if (!connected) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Connect WiFi to:");
-    lcd.setCursor(0, 1);
-    lcd.print(nameForAP);
-    wm.setConfigPortalTimeout(180); 
-    connected = wm.startConfigPortal(nameForAP);
-  }
-
-  if (connected && WiFi.status() == WL_CONNECTED) {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WiFi Connected");
-    lcd.setCursor(0, 1);
-    lcd.print("Fetching data...");
-
-    const char* yearStr = seasonYearParam.getValue();
-
-    fetchLocation();
-
-    if (yearStr != nullptr && strlen(yearStr) > 0) {
-      int year = atoi(yearStr);
-      if (year >= 1950 && year <= 2125) {
-        ChosenSeasonYear = year;
-      }
-    }
-
-  } else {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(" WIFI  NOT  SET ");
-    lcd.setCursor(0, 1);
-    lcd.print("RESET THE DEVICE");
-    Serial.println("Failed to connect to WiFi.");
-    delay(1000000); // effectively halts device
-  }
-}
-
-// for getting button input for switching stages
-void handleButtonPress() {
-  static bool lastButtonState = HIGH;
-  static unsigned long lastDebounceTime = 0;
-  static unsigned long buttonDownTime = 0;
-  static bool buttonHeld = false;
-  static bool buttonWasPressed = false;
-  const unsigned long debounceDelay = 80;
-  const unsigned long longPressTime = 2000;
-
-  bool reading = digitalRead(BLUE_BUTTON);
-
-  if (reading != lastButtonState) {
-    lastDebounceTime = millis();
-    lastButtonState = reading;
-  }
-
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (reading == LOW) {
-      if (!buttonWasPressed) {
-        buttonDownTime = millis();
-        buttonWasPressed = true;
-        buttonHeld = false;
-      } else if (!buttonHeld && millis() - buttonDownTime >= longPressTime) {
-        if (nightModeState == NIGHTMODE_FORCED) {
-          nightModeState = NIGHTMODE_OFF;
-        } else {
-          nightModeState = NIGHTMODE_FORCED;
-        }
-        buttonHeld = true;
-        checkNightMode();
-      }
-    } else {
-      if (buttonWasPressed && !buttonHeld) {
-        advanceStage();
-      }
-      buttonWasPressed = false;
-      buttonHeld = false;
-    }
-  }
-}
-
-// for checking on scheduled notifications
-void checkNotifications() {
-    time_t now = time(nullptr);
-
-    // If a notification is already active, don't trigger a new one until it's done
-    if (currentNotificationIndex != -1) return;
-
-    for (int i = 0; i < notificationCount; i++) {
-        Notification &n = notificationQueue[i];
-
-        if (!n.triggered && now >= n.triggerTime && now < n.triggerTime + 5*60) {
-            currentNotificationIndex = i;
-            displayStage = STAGE_NOTIFICATION;
-            notificationMsg = n.message;
-            n.triggered = true;
-            #if DEBUG_MODE
-                Serial.print("Triggered notification: ");
-                Serial.println(n.message);
-            #endif
-
-            return;
-        }
-    }
-}
-
-
-/*----------- Helper functions-----------*/
-/*#######################################*/
-
-
-/*#######################################*/
-/*----------- Stages rendering-----------*/
-
-// for automaticly switching stages and notification calling
+// clock -> weather automatically every 15 min; ends the 3 s clock between screens
 void autoAdvanceStage() {
-  const unsigned long stageInterval = 15UL * 60UL * 1000UL;
-  time_t now = time(NULL);
-
-  // for switching stages from clock every 15 min
-  if (millis() - lastStageChange > stageInterval && displayStage == STAGE_CLOCK) {
-    advanceStage();
+  if (displayStage != STAGE_CLOCK) return;
+  if (hasPending) {
+    if (millis() >= interludeUntil) advanceStage();
+    return;
   }
+  if (millis() - lastStageChange > STAGE_INTERVAL_MS) advanceStage();
 }
 
-// for moving to the next stage
-void advanceStage() {
-  lastStageChange = millis();
-  switch (displayStage) {
-    case STAGE_CLOCK: displayStage = STAGE_WEATHER; break;
-    case STAGE_WEATHER: displayStage = STAGE_CONSTRUCTORS; break;
-    case STAGE_CONSTRUCTORS: displayStage = STAGE_DRIVERS; break;
-    case STAGE_DRIVERS: displayStage = STAGE_CALENDAR; break;
-    case STAGE_CALENDAR: displayStage = STAGE_CLOCK; break;
-    case STAGE_NOTIFICATION: displayStage = STAGE_CLOCK; break;
-    default: displayStage = STAGE_CLOCK; break;
-  }
-  resetStageState();
-}
+/*------------ Screen handling ----------*/
+/*#######################################*/
 
-// for reseting values to default
-void resetStageState() {
-  constructorScroll.scrollIndex = 0;
-  constructorScroll.state = 0;
-  constructorScroll.lastScroll = millis();
+/*#######################################*/
+/*----------- Stages rendering ----------*/
 
-  driverScroll.scrollIndex = 0;
-  driverScroll.state = 0;
-  driverScroll.lastScroll = millis();
-
-  calendarScroll.scrollIndex = 0;
-  calendarScroll.state = 0;
-  calendarScroll.lastScroll = millis();
-  calendarFirstEntry = true;
-  calendarScrolling = false;
-  calendarDoneScrolling = false;
-  calendarScroll.startTime = millis();
-
-  weatherScroll.scrollIndex = 0;
-  iconsInitialized = false;
-  weatherScroll.startTime = millis();
-  weatherScroll.lastScroll = millis();
-
-  buzzerPlay.state = 0;
-  buzzerPlay.scrollIndex = 0;
-  buzzerPlay.startTime = millis();
-  lastDateStr = "";
-  lastBlinkTime = 0;
-  textVisible = true;
-  notificationScroll.scrollIndex = 0;
-  notificationScroll.startTime = 0;
-  lcd.clear();
-}
-
-// for displaying error message on race calendar stage
-void renderRaceError() {
-  static unsigned long errorStartTime = 0;
-
-  if (errorStartTime == 0) {
-    errorStartTime = millis();
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Race info error");
-    lcd.setCursor(0, 1);
-    lcd.print(raceErrorMsg.substring(0, 16));
-  }
-
-  if (millis() - errorStartTime > 7000) {
-    errorStartTime = 0;
-    advanceStage();
-  }
-}
-
-// for displaying current time and date
+// current time and date
 void renderClockStage() {
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate >= 1000) {
-    lastUpdate = millis();
-    time_t now = time(nullptr);
-    struct tm timeinfo;
-    char dateBuf[17], timeBuf[17];
+  if (millis() - clockLastUpdate < 1000) return;
+  clockLastUpdate = millis();
 
-    if (localtime_r(&now, &timeinfo)) {
-      strftime(dateBuf, sizeof(dateBuf), "%a %b %d", &timeinfo);
-      strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
-
-      String dateStr = String(dateBuf);
-      String timeStr = String(timeBuf);
-
-      if (dateStr != lastDateStr) {
-
-        lastDateStr = dateStr;
-        lcd.setCursor(0, 0);
-        int datePadding = (16 - dateStr.length()) / 2;
-        lcd.setCursor(datePadding, 0);
-        lcd.print(dateStr);
-      }
-
-      lcd.setCursor(0, 1);
-      int timePadding = (16 - timeStr.length()) / 2;
-      lcd.setCursor(timePadding, 1);
-      lcd.print(timeStr);
-      checkNightMode();
-    } else {
-      lcd.setCursor(0, 0);
-      lcd.print(" Time not set   ");
-      lcd.setCursor(0, 1);
-      lcd.print("                ");
-    }
+  if (!timeIsValid()) {
+    lastDateStr = "";
+    lcd.setCursor(0, 0);
+    lcd.print(" Time not set   ");
+    lcd.setCursor(0, 1);
+    lcd.print(WiFi.status() == WL_CONNECTED ? " syncing time..." : " no WiFi, retry ");
+    return;
   }
+
+  time_t now = time(nullptr);
+  struct tm timeinfo;
+  localtime_r(&now, &timeinfo);
+  char dateBuf[17], timeBuf[17];
+  strftime(dateBuf, sizeof(dateBuf), "%a %b %d", &timeinfo);
+  strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &timeinfo);
+
+  String dateStr = String(dateBuf);
+  String timeStr = String(timeBuf);
+
+  if (dateStr != lastDateStr) {
+    lastDateStr = dateStr;
+    String row = "";
+    int pad = (16 - (int)dateStr.length()) / 2;
+    for (int i = 0; i < pad; i++) row += ' ';
+    row += dateStr;
+    while (row.length() < 16) row += ' ';
+    lcd.setCursor(0, 0);
+    lcd.print(row);
+  }
+
+  String row1 = "";
+  int pad1 = (16 - (int)timeStr.length()) / 2;
+  for (int i = 0; i < pad1; i++) row1 += ' ';
+  row1 += timeStr;
+  while (row1.length() < 16) row1 += ' ';
+  lcd.setCursor(0, 1);
+  lcd.print(row1);
+
+  // small "!" in the corner = no fresh internet data for a while
+  lcd.setCursor(15, 0);
+  lcd.print(isOffline() ? '!' : ' ');
 }
 
-// for displaying constructors and drivers data scrolling
-void renderScrollingStage(const String& header1, const String& header2, std::vector<String>* bodyLines, ScrollState* scroll) {
-  static unsigned long showHeaderUntil = 0;
-  const char fillChar = (char)255;
-  const String carSymbol = constructCarSymbol();
+// constructors / drivers scrolling ticker
+void renderScrollingStage(const String& header1, const String& header2, const String& top, const String& bottom, ScrollState& s) {
+  unsigned long now = millis();
 
-  String topTicker = "            ";
-  String bottomTicker = "                    ";
-  for (size_t i = 0; i < bodyLines->size(); ++i) {
-    if (i % 2 == 0)
-      topTicker += "    " + carSymbol + "  " + bodyLines->at(i);
-    else
-      bottomTicker += "    " + carSymbol + "  " + bodyLines->at(i);
-  }
-
-  if (scroll->state == 0) {
-    lcd.clear();
+  if (!stageInitialized) {
+    stageInitialized = true;
+    createCarChars();
     lcd.setCursor(0, 0);
     lcd.print(header1);
     lcd.setCursor(0, 1);
     lcd.print(header2);
-
-    showHeaderUntil = millis() + 3000;
-    scroll->state = 1;
-    scroll->scrollIndex = 0;
-  }
-
-  if (millis() < showHeaderUntil) {
+    s.scrollIndex = 0;
+    s.lastScroll = now;
+    s.headerUntil = now + 3000;  // show the title for 3 s first
     return;
   }
 
-  if (scroll->state == 1) {
-    if (millis() - scroll->lastScroll > scroll->scrollSpeed) {
-      scroll->lastScroll = millis();
+  if (now < s.headerUntil) return;
+  if (now - s.lastScroll < (unsigned long)s.scrollSpeed) return;
+  s.lastScroll = now;
 
-      int topLen = topTicker.length();
-      int botLen = bottomTicker.length();
-      int maxLen = max(topLen, botLen);
+  lcd.setCursor(0, 0);
+  lcd.print(slice16(top, s.scrollIndex));
+  lcd.setCursor(0, 1);
+  lcd.print(slice16(bottom, s.scrollIndex));
 
-      lcd.setCursor(0, 0);
-      String top = (scroll->scrollIndex < topLen) ? topTicker.substring(scroll->scrollIndex) : "";
-      while (top.length() < 16) top += ' ';
-      lcd.print(top.substring(0, 16));
-
-      lcd.setCursor(0, 1);
-      String bot = (scroll->scrollIndex < botLen) ? bottomTicker.substring(scroll->scrollIndex) : "";
-      while (bot.length() < 16) bot += ' ';
-      lcd.print(bot.substring(0, 16));
-
-      scroll->scrollIndex++;
-      if (scroll->scrollIndex > maxLen) {
-        advanceStage();
-        lcd.clear();
-      }
-    }
-  }
+  s.scrollIndex++;
+  int maxLen = ((int)top.length() > (int)bottom.length()) ? (int)top.length() : (int)bottom.length();
+  if (s.scrollIndex > maxLen) advanceStage();
 }
 
-// for setting up constructors data
 void renderConstructorsStage() {
   const char fillChar = (char)255;
   const String spacer = String(fillChar) + String(fillChar) + String(fillChar);
   String header1 = spacer + " F1 W C C " + spacer;
   String header2 = String(seasonYear) + " Race:" + String(currentRound) + "/" + String(totalRounds);
-
-  renderScrollingStage(header1, header2, &constructorLines, &constructorScroll);
+  renderScrollingStage(header1, header2, constructorTop, constructorBottom, constructorScroll);
 }
 
-// for setting up drivers data
 void renderDriversStage() {
   const char fillChar = (char)255;
   const String spacer = String(fillChar) + String(fillChar) + String(fillChar);
   String header1 = spacer + " F1 W D C " + spacer;
   String header2 = String(seasonYear) + " Race:" + String(currentRound) + "/" + String(totalRounds);
-
-  renderScrollingStage(header1, header2, &driverLines, &driverScroll);
+  renderScrollingStage(header1, header2, driverTop, driverBottom, driverScroll);
 }
 
-// for displaying upcoming race data
-void renderCalendarStage() {
-  const unsigned long initialHold = 2000;
-  const unsigned long timeDisplayDuration = 5000;
+// "Today" / "Tomorrow" / "5 days" until the race (in local time)
+String whenText() {
+  if (!timeIsValid()) return "";
+  time_t now = time(nullptr);
+  struct tm a, b;
+  localtime_r(&now, &a);
+  localtime_r(&raceStart, &b);
+  a.tm_hour = a.tm_min = a.tm_sec = 0;
+  b.tm_hour = b.tm_min = b.tm_sec = 0;
+  a.tm_isdst = -1;
+  b.tm_isdst = -1;
+  long dayDiff = lround((double)(mktime(&b) - mktime(&a)) / 86400.0);
 
-  if (raceErrorMsg != "") {
+  if (dayDiff < 0) return "Passed";
+  if (dayDiff == 0) return "Today";
+  if (dayDiff == 1) return "Tomorrow";
+  return String(dayDiff) + " days";
+}
+
+void renderRaceError() {
+  static unsigned long errorStart = 0;
+  if (!stageInitialized) {
+    stageInitialized = true;
+    errorStart = millis();
+    lcd.setCursor(0, 0);
+    lcd.print("Race info error");
+    lcd.setCursor(0, 1);
+    lcd.print(raceErrorMsg.substring(0, 16));
+  }
+  if (millis() - errorStart > 7000) advanceStage();
+}
+
+// next race: name + days left (scrolls if long), then race and quali times
+void renderCalendarStage() {
+  if (!hasUpcomingRace) {
     renderRaceError();
     return;
   }
 
-  time_t now = time(nullptr);
+  const unsigned long holdMs = 2000;
+  const unsigned long timesMs = 5000;
+  unsigned long now = millis();
 
-  struct tm nowTm;
-  localtime_r(&now, &nowTm);
-  nowTm.tm_hour = 0;
-  nowTm.tm_min = 0;
-  nowTm.tm_sec = 0;
-  time_t todayMidnight = mktime(&nowTm);
-
-  struct tm raceTm;
-  localtime_r(&raceStart, &raceTm);
-  raceTm.tm_hour = 0;
-  raceTm.tm_min = 0;
-  raceTm.tm_sec = 0;
-  time_t raceMidnight = mktime(&raceTm);
-
-  long dayDiff = (raceMidnight - todayMidnight) / 86400;  // seconds in a day
-
-  String whenStr;
-  if (dayDiff < 0) {
-    whenStr = "Passed";
-  } else if (dayDiff == 0) {
-    whenStr = "Today";
-  } else if (dayDiff == 1) {
-    whenStr = "Tomorrow";
-  } else {
-    whenStr = String(dayDiff) + " days";
-  }
-
-  if (calendarScroll.state == 0) {
-    if (calendarFirstEntry) {
+  switch (calPhase) {
+    case 0: {  // draw title + start of the race name
       lcd.clear();
-      calendarScroll.scrollIndex = 0;
-      calendarScrolling = false;
-      calendarDoneScrolling = false;
-      calendarScroll.startTime = millis();
-      calendarFirstEntry = false;
-    }
-
-    lcd.setCursor(0, 0);
-    lcd.print("Next race: ");
-    lcd.print(String(upcomingRound) + "/" + String(totalRounds));
-
-    String Rname = sanitizeForLCD(raceName) + "  |  " + whenStr;
-    int maxScroll = max(0, (int)Rname.length() - 16);
-
-    if (!calendarScrolling && millis() - calendarScroll.startTime < initialHold) {
+      lcd.setCursor(0, 0);
+      lcd.print("Next race: " + String(upcomingRound) + "/" + String(totalRounds));
+      String when = whenText();
+      calText = raceName + (when.length() ? "  |  " + when : String(""));
       lcd.setCursor(0, 1);
-      lcd.print(Rname.substring(0, 16));
-      return;
+      lcd.print(slice16(calText, 0));
+      calScrollIdx = 0;
+      calPhaseStart = now;
+      calPhase = 1;
+      break;
     }
-
-    if (!calendarScrolling) {
-      calendarScrolling = true;
-      calendarScroll.startTime = millis();
-    }
-
-    if (calendarScrolling && !calendarDoneScrolling && millis() - calendarScroll.startTime >= calendarScroll.scrollSpeed) {
-      calendarScroll.startTime = millis();
-      lcd.setCursor(0, 1);
-      lcd.print(Rname.substring(calendarScroll.scrollIndex, calendarScroll.scrollIndex + 16));
-      calendarScroll.scrollIndex++;
-
-      if (calendarScroll.scrollIndex > maxScroll) {
-        calendarDoneScrolling = true;
-        calendarScroll.startTime = millis();
+    case 1:  // hold
+      if (now - calPhaseStart >= holdMs) {
+        calPhase = ((int)calText.length() > 16) ? 2 : 4;
+        calPhaseStart = now;
+        calLastStep = now;
       }
-      return;
-    }
-
-    if (calendarDoneScrolling && millis() - calendarScroll.startTime < initialHold) {
+      break;
+    case 2:  // scroll
+      if (now - calLastStep >= 375) {
+        calLastStep = now;
+        calScrollIdx++;
+        lcd.setCursor(0, 1);
+        lcd.print(slice16(calText, calScrollIdx));
+        if (calScrollIdx >= (int)calText.length() - 16) {
+          calPhase = 3;
+          calPhaseStart = now;
+        }
+      }
+      break;
+    case 3:  // hold at the end
+      if (now - calPhaseStart >= holdMs) calPhase = 4;
+      break;
+    case 4: {  // draw race + quali times (local time)
+      lcd.clear();
+      char raceTimeStr[17], qualiTimeStr[17];
+      struct tm raceLocal, qualiLocal;
+      localtime_r(&raceStart, &raceLocal);
+      strftime(raceTimeStr, sizeof(raceTimeStr), "R: %b %d %H:%M", &raceLocal);
+      if (qualiStart > 0) {
+        localtime_r(&qualiStart, &qualiLocal);
+        strftime(qualiTimeStr, sizeof(qualiTimeStr), "Q: %b %d %H:%M", &qualiLocal);
+      } else {
+        strcpy(qualiTimeStr, "Q: n/a");
+      }
+      lcd.setCursor(0, 0);
+      lcd.print(raceTimeStr);
       lcd.setCursor(0, 1);
-      lcd.print(Rname.substring(maxScroll, maxScroll + 16));
-      return;
+      lcd.print(qualiTimeStr);
+      calPhaseStart = now;
+      calPhase = 5;
+      break;
     }
-
-    if (calendarDoneScrolling && millis() - calendarScroll.startTime >= initialHold) {
-      lcd.clear();
-      calendarScroll.state = 1;
-      calendarFirstEntry = true;
-      return;
-    }
-  }
-
-  if (calendarScroll.state == 1) {
-    if (calendarFirstEntry) {
-      calendarScroll.startTime = millis();
-      lcd.clear();
-      calendarFirstEntry = false;
-    }
-
-    struct tm raceLocal, qualiLocal;
-    localtime_r(&raceStart, &raceLocal);
-    localtime_r(&qualiStart, &qualiLocal);
-
-    char raceTimeStr[17], qualiTimeStr[17];
-    strftime(raceTimeStr, sizeof(raceTimeStr), "R: %b %d %H:%M", &raceLocal);
-    strftime(qualiTimeStr, sizeof(qualiTimeStr), "Q: %b %d %H:%M", &qualiLocal);
-
-    lcd.setCursor(0, 0);
-    lcd.print(raceTimeStr);
-    lcd.setCursor(0, 1);
-    lcd.print(qualiTimeStr);
-
-    if (millis() - calendarScroll.startTime >= timeDisplayDuration) {
-      calendarScroll.state = 0;
-      calendarFirstEntry = true;
-      advanceStage();
-    }
+    case 5:
+      if (now - calPhaseStart >= timesMs) advanceStage();
+      break;
   }
 }
 
-// for dispalying notifiaction stage
+// flashing alert with moving cars and the buzzer
 void renderNotificationStage() {
   const unsigned long duration = 15000;
   const unsigned long blinkInterval = 500;
+  unsigned long now = millis();
 
-  const String carSymbol = constructCarSymbol();
-  String carLine = "";
-
-  while (carLine.length() < 20) {
-    carLine += carSymbol + "    ";
-  }
-
-  if (notificationScroll.startTime == 0) {
-    notificationScroll.startTime = millis();
-    notificationScroll.lastScroll = millis();
-    lastBlinkTime = millis();
+  if (!stageInitialized) {
+    stageInitialized = true;
+    createCarChars();
+    notifStart = now;
+    notificationScroll.lastScroll = 0;
     notificationScroll.scrollIndex = 0;
+    lastBlinkTime = 0;
     textVisible = true;
-    lcd.clear();
     startBuzzer();
   }
 
   updateBuzzer();
 
-  unsigned long now = millis();
-
-  if (now - notificationScroll.startTime > duration) {
-    notificationScroll.startTime = 0;
+  if (now - notifStart > duration) {
     notificationMsg = "";
     currentNotificationIndex = -1;
     advanceStage();
     return;
   }
 
-  if (now - notificationScroll.lastScroll >= notificationScroll.scrollSpeed) {
+  if (now - notificationScroll.lastScroll >= (unsigned long)notificationScroll.scrollSpeed) {
     lcd.setCursor(0, 0);
-    lcd.print(carLine.substring(notificationScroll.scrollIndex, notificationScroll.scrollIndex + 16));
+    lcd.print(slice16(carLine, notificationScroll.scrollIndex));
     notificationScroll.scrollIndex++;
-    if (notificationScroll.scrollIndex > carLine.length() - 16) {
-      notificationScroll.scrollIndex = 0;
-    }
+    if (notificationScroll.scrollIndex > (int)carLine.length() - 16) notificationScroll.scrollIndex = 0;
     notificationScroll.lastScroll = now;
   }
 
   if (now - lastBlinkTime >= blinkInterval) {
     lcd.setCursor(0, 1);
-    if (textVisible) {
-      lcd.print("                ");
-    } else {
-      lcd.print(notificationMsg.substring(0, 16));
-    }
+    lcd.print(textVisible ? slice16(notificationMsg, 0) : String("                "));
     textVisible = !textVisible;
     lastBlinkTime = now;
   }
-  updateBuzzer();
 }
 
-// for displaying weather data
+// weather now and +4 h, scrolling
 void renderWeatherStage() {
-  if (!iconsInitialized) {
-    weatherScroll.startTime = millis();
+  static String line1, line2;
+  static int period1 = 1, period2 = 1;
+  static unsigned long weatherStart = 0;
+  const String header1 = "Now: ";
+  const String header2 = "+4h: ";
+  const int scrollAreaWidth = 16 - 5;
+  unsigned long now = millis();
+
+  if (!stageInitialized) {
+    stageInitialized = true;
+    weatherStart = now;
+    weatherScroll.scrollIndex = 0;
+    weatherScroll.lastScroll = 0;
+
     lcd.createChar(1, temperatureIcon);
     lcd.createChar(2, rainIcon);
     lcd.createChar(3, celsiusIcon);
 
-    auto setCloudIcons = [](int base, int cloud, bool isNight) {
+    // sun / moon / cloud icon depends on cloud cover (moon only at night)
+    time_t t = time(nullptr);
+    struct tm tmNow;
+    localtime_r(&t, &tmNow);
+    bool nightNow = isNightHour(tmNow.tm_hour);
+    bool nightLater = isNightHour((tmNow.tm_hour + 4) % 24);
+
+    auto setCloudIcons = [](int base, int cloud, bool night) {
       if (cloud < 30) {
-        lcd.createChar(base, isNight ? moonIcon_1 : SunIcon_1);
-        lcd.createChar(base + 1, isNight ? moonIcon_2 : SunIcon_2);
+        lcd.createChar(base, night ? moonIcon_1 : SunIcon_1);
+        lcd.createChar(base + 1, night ? moonIcon_2 : SunIcon_2);
       } else if (cloud < 70) {
         lcd.createChar(base, cloudIcon_1);
         lcd.createChar(base + 1, cloudIcon_2);
@@ -1409,102 +1182,154 @@ void renderWeatherStage() {
         lcd.createChar(base + 1, cloudIconFill_2);
       }
     };
+    setCloudIcons(4, currentCloud, nightNow);
+    setCloudIcons(6, futureCloud, nightLater);
 
-    setCloudIcons(4, currentCloud, isNight);
-    setCloudIcons(6, futureCloud, isNight);
+    const String tempSymbol = String((char)1);
+    const String rainSymbol = String((char)2);
+    const String celsiusSymbol = String((char)3);
+    const String weatherSymbol = String((char)4) + String((char)5);
+    const String futureSymbol = String((char)6) + String((char)7);
 
-    iconsInitialized = true;
+    String d1 = tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + String(currentPrecip) + "%  " + weatherSymbol + " " + String(currentCloud) + "%";
+    String d2 = tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + String(futurePrecip) + "%  " + futureSymbol + " " + String(futureCloud) + "%";
+
+    line1 = "    " + d1 + "    " + d1 + "    " + d1;
+    line2 = "    " + d2 + "    " + d2 + "    " + d2;
+    period1 = d1.length() + 4;  // one repeat of "    " + data
+    period2 = d2.length() + 4;
   }
 
-  const String tempSymbol = String((char)1);
-  const String rainSymbol = String((char)2);
-  const String celsiusSymbol = String((char)3);
-  const String weatherSymbol = String((char)4) + String((char)5);
-  const String futureSymbol = String((char)6) + String((char)7);
-
-  String header1 = "Now: ";
-  String header2 = "+4h: ";
-
-  String scrollData1 = tempSymbol + " " + String(currentTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + currentPrecip + "%  " + weatherSymbol + " " + currentCloud + "%";
-  String scrollData2 = tempSymbol + " " + String(futureTemp, 1) + celsiusSymbol + "  " + rainSymbol + " " + futurePrecip + "%  " + futureSymbol + " " + futureCloud + "%";
-
-
-  String paddedScroll1 = "    " + scrollData1 + "    " + scrollData1 + "    " + scrollData1;
-  String paddedScroll2 = "    " + scrollData2 + "    " + scrollData2 + "    " + scrollData2;
-
-  const int scrollAreaWidth = 16 - header1.length();
-
-  if (millis() - weatherScroll.lastScroll >= weatherScroll.scrollSpeed) {
+  if (now - weatherScroll.lastScroll >= (unsigned long)weatherScroll.scrollSpeed) {
+    int o1 = weatherScroll.scrollIndex % period1;
+    int o2 = weatherScroll.scrollIndex % period2;
     lcd.setCursor(0, 0);
     lcd.print(header1);
-    lcd.print(paddedScroll1.substring(weatherScroll.scrollIndex, weatherScroll.scrollIndex + scrollAreaWidth));
-
+    lcd.print(line1.substring(o1, o1 + scrollAreaWidth));
     lcd.setCursor(0, 1);
     lcd.print(header2);
-    lcd.print(paddedScroll2.substring(weatherScroll.scrollIndex, weatherScroll.scrollIndex + scrollAreaWidth));
-
-    weatherScroll.scrollIndex = (weatherScroll.scrollIndex + 1) % min(paddedScroll1.length(), paddedScroll2.length() - scrollAreaWidth + 1);
-    weatherScroll.lastScroll = millis();
+    lcd.print(line2.substring(o2, o2 + scrollAreaWidth));
+    weatherScroll.scrollIndex++;
+    weatherScroll.lastScroll = now;
   }
 
-  if (millis() - weatherScroll.startTime > 23000) {
-    advanceStage();
-  }
+  if (now - weatherStart > 23000) advanceStage();
 }
 
-// for rendering current stage
 void renderCurrentStage() {
   switch (displayStage) {
-    case STAGE_CLOCK:
-      renderClockStage();
-      break;
-    case STAGE_CONSTRUCTORS:
-      renderConstructorsStage();
-      break;
-    case STAGE_DRIVERS:
-      renderDriversStage();
-      break;
-    case STAGE_CALENDAR:
-      renderCalendarStage();
-      break;
-    case STAGE_NOTIFICATION:
-      renderNotificationStage();
-      break;
-    case STAGE_WEATHER:
-      renderWeatherStage();
-      break;
+    case STAGE_CLOCK: renderClockStage(); break;
+    case STAGE_WEATHER: renderWeatherStage(); break;
+    case STAGE_CONSTRUCTORS: renderConstructorsStage(); break;
+    case STAGE_DRIVERS: renderDriversStage(); break;
+    case STAGE_CALENDAR: renderCalendarStage(); break;
+    case STAGE_NOTIFICATION: renderNotificationStage(); break;
   }
 }
 
-/*----------- Stages rendering-----------*/
+/*----------- Stages rendering ----------*/
 /*#######################################*/
+
+/*#######################################*/
+/*------------------ Setup --------------*/
+
+// connects to saved WiFi, or opens the setup portal on first start.
+// If the saved WiFi is just temporarily gone (power cut, router rebooting) the
+// device does NOT stop: it runs as a clock and keeps reconnecting.
+void setupWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);
+
+  bool forcePortal = false;
+  bool connected = false;
+
+  // hold the button while powering on to forget the saved WiFi
+  if (digitalRead(BLUE_BUTTON) == LOW) {
+    showMessage("Resetting WiFi..", "");
+    delay(1500);
+    if (digitalRead(BLUE_BUTTON) == LOW) {
+      wm.resetSettings();
+      forcePortal = true;
+    }
+  }
+
+  if (!forcePortal) {
+    showMessage("Checking WiFi...", "");
+    WiFi.begin();
+    unsigned long startAttempt = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 15000) {
+      delay(250);
+    }
+    connected = (WiFi.status() == WL_CONNECTED);
+  }
+
+  bool hasSavedWiFi = (WiFi.SSID().length() > 0);
+
+  // no WiFi saved yet (or reset requested): open the setup hotspot
+  if (!connected && (forcePortal || !hasSavedWiFi)) {
+    showMessage("Connect WiFi to:", nameForAP);
+    while (!connected) {
+      connected = wm.startConfigPortal(nameForAP);
+    }
+  }
+
+  if (connected) {
+    WiFi.setAutoReconnect(true);
+  } else {
+    showMessage("WiFi not found", "Retrying...");
+    delay(2000);
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   lcd.init();
   lcd.backlight();
   pinMode(BLUE_BUTTON, INPUT_PULLUP);
+  pinMode(BUZZER_PIN, OUTPUT);
+  lastSuccessMs = millis();
 
-  setupWiFiAndSeason();
+  // car symbol (custom chars 1-4) and the car row used by the alert screen
+  carSymbol = String((char)1) + String((char)2) + String((char)3) + String((char)4);
+  carLine = "";
+  while (carLine.length() < 24) carLine += carSymbol + "    ";
 
-  refreshAllData();
-  fetchCurrentWeather();
+  // apply the time zone rule right away (before the first NTP sync)
+  setenv("TZ", TIMEZONE, 1);
+  tzset();
 
-  lcd.clear();
+  setupWiFi();
+  wifiWasConnected = (WiFi.status() == WL_CONNECTED);
+  startTimeSync();
 
-  #if DEBUG_MODE
-    Serial.println("Constructor Standings:");
-    for (String line : constructorLines) Serial.println(line);
+  if (wifiWasConnected) {
+    showMessage("WiFi Connected", "Syncing time...");
+    unsigned long t0 = millis();
+    while (!timeIsValid() && millis() - t0 < 15000) delay(200);
 
-    Serial.println("Driver Standings:");
-    for (String line : driverLines) Serial.println(line);
-  #endif
+    showMessage("WiFi Connected", "Fetching data...");
+    refreshAllData();
+    nextWeatherCheckTime = 0;  // weather is fetched right away by the first loop
+    if (fetchCurrentWeather()) nextWeatherCheckTime = time(nullptr) + 60 * 60;
+  }
+
+  switchTo(STAGE_CLOCK);
+
+#if DEBUG_MODE
+  Serial.println("Setup done");
+  Serial.println(String("Time valid: ") + (timeIsValid() ? "yes" : "no"));
+#endif
 }
 
 void loop() {
   handleButtonPress();
+  housekeeping();
   autoAdvanceStage();
   checkNotifications();
   checkForNewDataIfTime();
   renderCurrentStage();
 }
+
+/*------------------ Setup --------------*/
+/*#######################################*/
