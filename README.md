@@ -74,12 +74,6 @@ The device fetches data from the following public APIs:
 - **F1 data** from [jolpi.ca/ergast](https://api.jolpi.ca/ergast/)
   - Race schedule, qualifying times, constructor & driver standings
 
-- **IP Geolocation** from [ip-api.com](https://ip-api.com/)
-  - Used to determine latitude/longitude and IP for timezone lookup
-
-- **Timezone info** from [worldtimeapi.org](http://worldtimeapi.org/)
-  - Raw and DST offsets based on IP, used for setting system time
-
 - **Weather data** from [open-meteo.com](https://open-meteo.com/en/docs)
   - Hourly temperature, cloud coverage, and precipitation probability
 
@@ -170,7 +164,7 @@ Huge shoutout to the folks at [jolpica-f1](https://github.com/jolpica/jolpica-f1
 
 Thanks to [WiFiManager](https://github.com/tzapu/WiFiManager) for making WiFi super easy to setup. 🏆
 
->  I'm not much of software engineer and this is my first microcontroler project, so it is a bit rough :)
+>  I'm not much of software engineer, so it is a bit rough :)
 
 ---
 
